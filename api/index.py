@@ -1,20 +1,30 @@
 import os
+import logging
 import telebot
 from telebot import types
 from flask import Flask, request
 
-# ከ Vercel Environment Variables ላይ ቶከኑን ያግያል
-# ወይም ለሙከራ ከታች ያለውን 'YOUR_TOKEN_HERE' በሚለው መቀየር ትችላለህ
-TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', 'YOUR_BOT_TOKEN_HERE')
+# ሎግ (Log) ማየት እንድንችል
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-bot = telebot.TeleBot(TOKEN)
+# ቶከኑን ከ Environment Variable ያግኛል
+TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
+
+# ቶከን ከሌለ ለጊዜው ኮዱ እንዳይበላሽ ባዶ እሴት እንሰጠዋለን (ግን ቦቱ አይሰራም)
+if not TOKEN:
+    logger.error("Error: TELEGRAM_BOT_TOKEN not found in environment variables!")
+    bot = None
+else:
+    bot = telebot.TeleBot(TOKEN, threaded=False)
+
 app = Flask(__name__)
 
 # --- ዋናው ኪቦርድ (Main Menu) ---
 def main_menu_keyboard():
     markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
     
-    # ቁልፎቹን እንፍጠር (ልክ በ screenshot ላይ እንዳለው ዲዛይን)
+    # አዝራሮች (Buttons)
     btn_sos = types.KeyboardButton("🆘 እርዳኝ (SOS)")
     btn_tips = types.KeyboardButton("🧠 ምክር/ዘዴዎች")
     btn_stories = types.KeyboardButton("💪 የለውጥ ታሪኮች")
@@ -22,89 +32,92 @@ def main_menu_keyboard():
     btn_ask = types.KeyboardButton("❓ ጥያቄ ለመጠየቅ")
     btn_about = types.KeyboardButton("ℹ️ ስለ ቦቱ")
     
-    # ወደ ኪቦርዱ እንጨምራቸው (በሁለት መስመር)
     markup.add(btn_sos, btn_tips, btn_stories, btn_resources, btn_ask, btn_about)
     return markup
 
-# --- Start ትእዛዝ ሲመጣ ---
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
-    welcome_text = (
-        f"ሰላም {message.from_user.first_name}! 👋\n\n"
-        "ወደ ነጻነት ጉዞ እንኳን በደህና መጡ። "
-        "ይህ ቦት ከፖርኖግራፊ ሱስ ለመውጣት በሚያደርጉት ጉዞ አጋዥ እንዲሆን ታስቦ የተዘጋጀ ነው።\n\n"
-        "ከታች ካሉት አማራጮች ይምረጡ 👇"
-    )
-    bot.send_message(message.chat.id, welcome_text, reply_markup=main_menu_keyboard())
+# --- መልእክት አስተናጋጆች (Handlers) ---
 
-# --- የቁልፍ ምላሾች (Button Responses) ---
+if bot:
+    @bot.message_handler(commands=['start'])
+    def send_welcome(message):
+        try:
+            welcome_text = (
+                f"ሰላም {message.from_user.first_name}! 👋\n\n"
+                "ወደ ነጻነት ጉዞ እንኳን በደህና መጡ። "
+                "ይህ ቦት ከፖርኖግራፊ ሱስ ለመውጣት በሚያደርጉት ጉዞ አጋዥ ነው።\n\n"
+                "ከታች ካሉት አማራጮች ይምረጡ 👇"
+            )
+            bot.send_message(message.chat.id, welcome_text, reply_markup=main_menu_keyboard())
+        except Exception as e:
+            logger.error(f"Error in start command: {e}")
 
-# 1. እርዳኝ (SOS)
-@bot.message_handler(func=lambda message: message.text == "🆘 እርዳኝ (SOS)")
-def sos_response(message):
-    sos_text = (
-        "🚨 **ረጋ በል!** ስሜቱ ጊዜያዊ ነው።\n\n"
-        "1. ስልክህን አሁን አስቀምጥና ከክፍሉ ውጣ።\n"
-        "2. ቀዝቃዛ ውሃ ፊትህን ታጠብ።\n"
-        "3. ለጓደኛህ ወይም ለቤተሰብ ደውል አውራ።\n"
-        "4. 10 ጊዜ በጥልቀት ተንፍስ።\n\n"
-        "ይህን ስሜት ማሸነፍ ትችላለህ! 💪"
-    )
-    bot.send_message(message.chat.id, sos_text, parse_mode='Markdown')
+    # 1. እርዳኝ (SOS)
+    @bot.message_handler(func=lambda message: message.text == "🆘 እርዳኝ (SOS)")
+    def sos_response(message):
+        try:
+            sos_text = (
+                "🚨 **ረጋ በል!** ስሜቱ ጊዜያዊ ነው።\n\n"
+                "1. ስልክህን አሁን አስቀምጥና ከክፍሉ ውጣ።\n"
+                "2. ቀዝቃዛ ውሃ ፊትህን ታጠብ።\n"
+                "3. ለጓደኛህ ወይም ለቤተሰብ ደውል አውራ።\n"
+                "4. 10 ጊዜ በጥልቀት ተንፍስ።"
+            )
+            bot.send_message(message.chat.id, sos_text, parse_mode='Markdown')
+        except Exception as e:
+            logger.error(f"Error in SOS: {e}")
 
-# 2. ምክር እና ዘዴዎች
-@bot.message_handler(func=lambda message: message.text == "🧠 ምክር/ዘዴዎች")
-def tips_response(message):
-    tips_text = (
-        "✅ **ሱስን ለማሸነፍ የሚረዱ ዘዴዎች፡**\n\n"
-        "1. **ቀስቃሽ ነገሮችን አስወግድ:** እንደ TikTok, Instagram ወይም Telegram ቻናሎችን አጽዳ።\n"
-        "2. **ጊዜህን ሙላ:** ስፖርት ስራ፣ መጽሐፍ አንብብ።\n"
-        "3. **ብቻህን አትሁን:** በር ክፍት አድርገህ ተቀመጥ።"
-    )
-    bot.send_message(message.chat.id, tips_text)
+    # 2. ምክር እና ዘዴዎች
+    @bot.message_handler(func=lambda message: message.text == "🧠 ምክር/ዘዴዎች")
+    def tips_response(message):
+        bot.send_message(message.chat.id, "✅ **ሱስን ለማሸነፍ:**\n1. ቀስቃሽ ነገሮችን አስወግድ።\n2. ጊዜህን በስራ ሙላ።")
 
-# 3. የለውጥ ታሪኮች
-@bot.message_handler(func=lambda message: message.text == "💪 የለውጥ ታሪኮች")
-def stories_response(message):
-    # እዚህ ወደፊት ከ Database ወይም ቻናል ማምጣት ይቻላል
-    story_text = (
-        "አንድ ወጣት እንዲህ ይላል፡\n"
-        "'ለ5 ዓመታት በዚህ ሱስ ተይዤ ነበር። ነገር ግን ስልኬን ማታ ወደ መኝታ አለማስገባት ስጀምርና "
-        "ለጓደኛዬ ችግሬን ነግሬ እርዳታ ስጠይቅ ቀስ በቀስ ነጻ ወጣሁ።'"
-    )
-    bot.send_message(message.chat.id, story_text)
+    # 3. የለውጥ ታሪኮች
+    @bot.message_handler(func=lambda message: message.text == "💪 የለውጥ ታሪኮች")
+    def stories_response(message):
+        bot.send_message(message.chat.id, "አንድ ወጣት፡ 'ስልኬን ማታ ከእኔ ማራቅ ስጀምር ለውጥ አየሁ።'")
 
-# 4. መርጃዎች
-@bot.message_handler(func=lambda message: message.text == "📚 መርጃዎች")
-def resources_response(message):
-    bot.send_message(message.chat.id, "በቅርቡ እዚህ ጋር ጠቃሚ መጽሐፍት እና የድምጽ ፋይሎች ይጫናሉ!")
+    # 4. መርጃዎች
+    @bot.message_handler(func=lambda message: message.text == "📚 መርጃዎች")
+    def resources_response(message):
+        bot.send_message(message.chat.id, "መጽሐፍት በቅርቡ ይጫናሉ።")
 
-# 5. ጥያቄ
-@bot.message_handler(func=lambda message: message.text == "❓ ጥያቄ ለመጠየቅ")
-def ask_response(message):
-    bot.send_message(message.chat.id, "ጥያቄ ካለዎት በዚህ አድራሻ ያናግሩን፡ @YourAdminUsername")
+    # 5. ጥያቄ
+    @bot.message_handler(func=lambda message: message.text == "❓ ጥያቄ ለመጠየቅ")
+    def ask_response(message):
+        bot.send_message(message.chat.id, "ጥያቄ ካለዎት አድሚንን ያናግሩ።")
 
-# 6. ስለ ቦቱ
-@bot.message_handler(func=lambda message: message.text == "ℹ️ ስለ ቦቱ")
-def about_response(message):
-    bot.send_message(message.chat.id, "ይህ ቦት የተሰራው ወጣቶችን ለመርዳት በጎ ፈቃደኞች ነው።")
+    # 6. ስለ ቦቱ
+    @bot.message_handler(func=lambda message: message.text == "ℹ️ ስለ ቦቱ")
+    def about_response(message):
+        bot.send_message(message.chat.id, "ይህ ቦት በበጎ ፈቃደኞች የተሰራ ነው።")
 
-# --- Webhook Route for Vercel ---
-@app.route('/' + TOKEN, methods=['POST'])
+
+# --- Webhook Route ---
+@app.route('/' + (TOKEN if TOKEN else 'webhook'), methods=['POST'])
 def getMessage():
-    json_string = request.get_data().decode('utf-8')
-    update = telebot.types.Update.de_json(json_string)
-    bot.process_new_updates([update])
-    return "!", 200
+    if not bot:
+        return "Bot token not configured", 500
+    try:
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return "!", 200
+    except Exception as e:
+        logger.error(f"Error processing update: {e}")
+        return "Error", 500
 
 @app.route("/")
 def webhook():
-    bot.remove_webhook()
-    # Vercel ላይ ያለውን የፕሮጀክትህን URL እዚህ ታስገባለህ
-    # ለምሳሌ: https://your-project-name.vercel.app
-    # ይህ በራስ ሰራድ (Automatic) እንዲሆን ከተፈለገ ሌላ ዘዴ መጠቀም ይቻላል፣
-    # ግን ለቀላልነት እዚህ ጋር URLህን ማስገባት ወይም Browser ላይ Set Webhook ማድረግ ይቻላል።
-    return "Bot is running!", 200
+    if not bot:
+        return "Error: TELEGRAM_BOT_TOKEN not set in Vercel Environment Variables.", 500
+    
+    # ቦቱ እየሰራ መሆኑን ለማረጋገጥ
+    try:
+        # Webhook መረጃን ማየት ከፈለግን (Optional)
+        webhook_info = bot.get_webhook_info()
+        return f"Bot is running! Webhook URL: {webhook_info.url}", 200
+    except Exception as e:
+        return f"Bot is running, but failed to get info: {e}", 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get('PORT', 5000)))
