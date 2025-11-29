@@ -1,0 +1,17 @@
+{
+  "name": "nofap-telegram-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot for NoFap group with admin panel",
+  "main": "api/index.js",
+  "scripts": {
+    "start": "node api/index.js"
+  },
+  "dependencies": {
+    "telegraf": "^4.12.2",
+    "mongoose": "^7.0.3",
+    "dotenv": "^16.0.3"
+  },
+  "engines": {
+    "node": "18.x"
+  }
+}
