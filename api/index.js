@@ -68,6 +68,16 @@ async function connectToDatabase() {
   }
 }
 
+// --- Helper Functions (Added Back) ---
+async function getConfig(key, defaultValue) {
+    const doc = await Config.findOne({ key });
+    return doc ? doc.value : defaultValue;
+}
+
+async function setConfig(key, value) {
+    await Config.findOneAndUpdate({ key }, { value }, { upsert: true, new: true });
+}
+
 // --- Bot Setup ---
 const bot = new Telegraf(BOT_TOKEN);
 bot.use(session());
