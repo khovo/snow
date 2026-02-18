@@ -187,7 +187,7 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
                     await clearAdminStep(userId); return;
                 }
 
-                // ... Configs ...
+                // Configs (Only Welcome and Channels/Custom Btns remain)
                 if (state.step === 'awaiting_welcome') { await Config.findOneAndUpdate({ key: 'welcome_msg' }, { value: text }, { upsert: true }); await ctx.reply('✅ Saved!'); await clearAdminStep(userId); return; }
                 if (state.step === 'awaiting_channel_name') { await setAdminStep(userId, 'awaiting_channel_link', { name: text }); return ctx.reply('🔗 Link:'); }
                 if (state.step === 'awaiting_channel_link') { await Channel.create({ name: state.tempData.name, link: text }); await ctx.reply('✅ Added!'); await clearAdminStep(userId); return; }
@@ -260,7 +260,6 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
         const streakLabel = await getConfig('streak_btn_label', '📅 ቀኔን ቁጠር');
         if (text === streakLabel) return handleStreak(ctx);
 
-        // *** THIS IS THE MISSING PART THAT WAS CAUSING THE ISSUE ***
         const communityLabel = await getConfig('comm_btn_label', '💬 የጥንካሬ መድረክ');
         if (text === communityLabel) return handleCommunity(ctx);
 
@@ -351,7 +350,7 @@ bot.action(/^reply_to_(.+)$/, async ctx => {
     await ctx.answerCbQuery();
 });
 
-// --- STREAK & GROWTH (FIXED & ROBUST) ---
+// --- STREAK & GROWTH (FIXED) ---
 async function handleStreak(ctx) {
     try {
         const userId = String(ctx.from.id);
@@ -361,7 +360,7 @@ async function handleStreak(ctx) {
         const diff = Math.floor(Math.abs(new Date() - user.streakStart) / 86400000);
         const stage = getGrowthStage(diff); 
         
-        // Escape Markdown characters to prevent crashing
+        // **FIX**: Escape user name and stage to prevent MarkdownV2 crash
         const name = escapeMarkdown(user.firstName || 'User');
         const escapedStage = escapeMarkdown(stage);
         
@@ -378,19 +377,27 @@ async function handleStreak(ctx) {
     } catch(e) { console.error("Streak Error:", e); }
 }
 
-// --- ACTIVE LEADERBOARD ---
+// --- ACTIVE LEADERBOARD (FIXED) ---
 bot.action(/^led_(.+)$/, async ctx => {
     try {
         const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
         const topUsers = await User.find({ lastActive: { $gte: sevenDaysAgo } }).sort({ streakStart: 1 }).limit(10);
-        let msg = '🏆 *Top 10 Active Warriors* 🏆\n_(Last 7 Days)_\n\n';
-        if (topUsers.length === 0) msg += "No active users.";
+        // Fixed: Escape parenthesis and dot
+        let msg = '🏆 *Top 10 Active Warriors* 🏆\n_\\(Last 7 Days\\)_\n\n';
+        if (topUsers.length === 0) msg += "No active users\\.";
+
         topUsers.forEach((u, i) => {
             const d = Math.floor(Math.abs(new Date() - u.streakStart) / 86400000);
-            msg += `${i+1}\\. ${escapeMarkdown(u.firstName || 'User').substring(0, 15)} — *${d} days*\n`;
+            // Fixed: Substring first then escape
+            const cleanName = (u.firstName || 'User').substring(0, 15);
+            const name = escapeMarkdown(cleanName);
+            msg += `${i+1}\\. ${name} — *${d} days*\n`;
         });
         await ctx.editMessageText(msg, { parse_mode: 'MarkdownV2', ...Markup.inlineKeyboard([[Markup.button.callback('🔙 Back', `ref_${ctx.match[1]}`)]]) });
-    } catch (e) { ctx.answerCbQuery("Error"); }
+    } catch (e) { 
+        console.error("Led Error:", e);
+        ctx.answerCbQuery("Error"); 
+    }
 });
 
 const verify = (ctx, id) => String(ctx.from.id) === id;
@@ -399,7 +406,7 @@ bot.action(/^rsn_(.+)_(.+)$/, async ctx => { if(!verify(ctx, ctx.match[2])) retu
 bot.action(/^ref_(.+)$/, async ctx => { if(!verify(ctx, ctx.match[1])) return ctx.answerCbQuery('Not allowed'); try{await ctx.deleteMessage();}catch(e){} await handleStreak(ctx); ctx.answerCbQuery(); });
 bot.action(/^can_(.+)$/, async ctx => { if(!verify(ctx, ctx.match[1])) return ctx.answerCbQuery('Not allowed'); try{await ctx.deleteMessage();}catch(e){} ctx.answerCbQuery(); });
 
-// --- ADMIN PANEL (UPDATED - REMOVED MOTIVATION/LAYOUT/RENAME) ---
+// --- ADMIN PANEL (CLEANED) ---
 async function showAdminMenu(ctx) {
     const c = await User.countDocuments();
     const p = await Post.countDocuments({ status: 'pending' });
