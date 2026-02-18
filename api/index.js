@@ -92,13 +92,18 @@ commentSchema.index({ createdAt: 1 }, { expireAfterSeconds: 604800 });
 const Comment = mongoose.models.Comment || mongoose.model('Comment', commentSchema);
 
 // ============================================================
-// 3. DB CONNECTION
+// 3. DB CONNECTION (OPTIMIZED)
 // ============================================================
 let cachedDb = null;
 async function connectToDatabase() {
   if (cachedDb) return cachedDb;
   try {
-    cachedDb = await mongoose.connect(MONGODB_URI, { serverSelectionTimeoutMS: 5000, socketTimeoutMS: 45000 });
+    // bufferCommands: false helps fail fast if connection is lost
+    cachedDb = await mongoose.connect(MONGODB_URI, { 
+        serverSelectionTimeoutMS: 5000, 
+        socketTimeoutMS: 45000,
+        bufferCommands: false 
+    });
     return cachedDb;
   } catch (error) { throw error; }
 }
@@ -136,7 +141,6 @@ async function sendCleanMessage(ctx, text, extra, userId) {
     const user = await User.findOne({ userId });
     
     // In Groups, we might not have permission to delete messages or track the last ID correctly per user context
-    // So we wrap in try/catch heavily.
     if (ctx.chat.type === 'private' && user && user.lastMenuId) {
         try { await ctx.deleteMessage(user.lastMenuId); } 
         catch (e) { /* Ignore if old or fail */ }
@@ -145,7 +149,7 @@ async function sendCleanMessage(ctx, text, extra, userId) {
     // Send new
     const sent = await ctx.reply(text, extra);
     
-    // Only save lastMenuId if private, to avoid confusion in groups
+    // Only save lastMenuId if private
     if (ctx.chat.type === 'private') {
         await User.findOneAndUpdate({ userId }, { lastMenuId: sent.message_id });
     }
@@ -159,9 +163,6 @@ const bot = new Telegraf(BOT_TOKEN);
 
 bot.start(async (ctx) => {
   try {
-    // REMOVED: check for private chat. Now allows groups.
-    // if (ctx.chat.type !== 'private') return; 
-
     const userId = String(ctx.from.id);
     const firstName = ctx.from.first_name || 'Friend';
     const user = await User.findOne({ userId });
@@ -169,7 +170,7 @@ bot.start(async (ctx) => {
 
     await User.findOneAndUpdate({ userId }, { firstName, lastActive: new Date() }, { upsert: true });
     
-    // Only clear admin step if in private, so group chat doesn't mess up admin wizards
+    // Only clear admin step if in private
     if (ctx.chat.type === 'private' && ADMIN_IDS.includes(userId)) await clearAdminStep(userId);
 
     const urgeLabel = await getConfig('urge_btn_label', '🆘 እርዳኝ');
@@ -210,7 +211,6 @@ bot.start(async (ctx) => {
 });
 
 bot.command('profile', async (ctx) => {
-    // Profile is personal, prefer private but allowed in group if needed (usually triggers PM)
     showProfile(ctx, String(ctx.from.id));
 });
 
@@ -220,15 +220,11 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
         const userId = String(ctx.from.id);
         const text = ctx.message.text; 
         
-        // REMOVED: check for private chat to allow group interactions
-        // if (ctx.chat.type !== 'private') return; 
-
         const currentUser = await User.findOne({ userId });
         if (currentUser && currentUser.isBanned) return;
         await User.findOneAndUpdate({ userId }, { lastActive: new Date() });
 
         // === ADMIN WIZARD (RESTRICT TO PRIVATE CHAT) ===
-        // Admins should not configure the bot inside a public group
         if (ctx.chat.type === 'private' && ADMIN_IDS.includes(userId)) {
             const state = await getAdminState(userId);
             if (state && state.step) {
@@ -326,7 +322,6 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
         }
 
         // === USER STATE (Write confession, comment) - PRIVATE ONLY ===
-        // We do not want users sending confessions into the group chat openly
         if (ctx.chat.type === 'private') {
             const userState = await getAdminState(userId);
             if (userState && userState.step === 'edit_nickname') { await User.findOneAndUpdate({ userId }, { nickname: text }); await clearAdminStep(userId); await ctx.reply('✅ Nickname updated!'); return showProfile(ctx, userId); }
@@ -364,7 +359,6 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
         }
 
         // === MENU INTERACTIONS (Allowed in Groups) ===
-        // Admin panel button is hidden from layout in groups, but if typed manually, ignore it in groups
         if (text === '🔐 Admin Panel' && ADMIN_IDS.includes(userId) && ctx.chat.type === 'private') return showAdminMenu(ctx);
 
         const urgeLabel = await getConfig('urge_btn_label', '🆘 እርዳኝ');
@@ -380,7 +374,6 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
 
         const communityLabel = await getConfig('comm_btn_label', '🗣 Confessions');
         if (text === communityLabel) {
-            // Force private for confessions
             if (ctx.chat.type !== 'private') {
                 return ctx.reply('⚠️ ለምስጢራዊነት ሲባል ይህ አገልግሎት በግል (Private Chat) ብቻ ነው የሚሰራው።', Markup.inlineKeyboard([[Markup.button.url('Go to Private Chat', `https://t.me/${ctx.botInfo.username}`)]]));
             }
@@ -430,9 +423,6 @@ async function showProfile(ctx, userId) {
     if (!user) return ctx.reply("User not found.");
     const msg = `👤 *Profile*\n\n🏷️ *Name:* ${escapeMarkdown(user.nickname)}\n🎭 *Emoji:* ${user.emoji}\n⚡️ *Aura:* ${user.aura}\n📝 *Bio:* ${escapeMarkdown(user.bio)}`;
     
-    // In Groups, we don't want "Edit" buttons confusing things, but keeping it simple for now is okay.
-    // If clicked in group, the bot will likely prompt in group which is messy.
-    // Ideally, redirect to private.
     const isPrivate = ctx.chat.type === 'private';
     const buttons = isPrivate ? 
         [[Markup.button.callback('✏️ Edit Name', 'prof_name'), Markup.button.callback('✏️ Edit Bio', 'prof_bio')], [Markup.button.callback('😊 Edit Emoji', 'prof_emoji')], [Markup.button.callback('🔙 Back', 'back_to_menu')]] :
@@ -463,7 +453,6 @@ async function handleConfessions(ctx) {
 }
 
 bot.action('back_to_menu', async ctx => {
-    // Edit the message back to Main Menu instead of delete+send
     try {
         const userId = String(ctx.from.id);
         const welcomeMsg = await getConfig('welcome_msg', `Welcome back!`);
@@ -483,7 +472,6 @@ bot.action('back_to_menu', async ctx => {
         
         if (ADMIN_IDS.includes(userId) && ctx.chat.type === 'private' && !layout.flat().includes('🔐 Admin Panel')) layout.push(['🔐 Admin Panel']);
 
-        // Since main menu uses Keyboard (ReplyMarkup) not Inline, we MUST send a new message.
         await ctx.deleteMessage();
         const sent = await ctx.reply(welcomeMsg, Markup.keyboard(layout).resize());
         
@@ -492,7 +480,6 @@ bot.action('back_to_menu', async ctx => {
         }
         
     } catch (e) { 
-        // Fallback
         const sent = await ctx.reply('Menu', Markup.keyboard([['Start']]).resize());
     }
     await ctx.answerCbQuery();
@@ -610,7 +597,6 @@ bot.action(/^vote_(up|down)_(.+)$/, async ctx => {
 });
 
 bot.action(/^add_comment_(.+)$/, async ctx => {
-    // Only allow commenting from private chat to handle reply flow correctly
     if (ctx.chat.type !== 'private') return ctx.reply('Please reply in private chat.', Markup.inlineKeyboard([[Markup.button.url('Go to Private', `https://t.me/${ctx.botInfo.username}`)]]));
 
     await setAdminStep(String(ctx.from.id), 'awaiting_comment', { postId: ctx.match[1] });
@@ -776,7 +762,8 @@ module.exports = async (req, res) => {
             try { await ProcessedUpdate.create({ update_id: update.update_id }); } catch(e) { if(e.code===11000) return; throw e; }
             await bot.handleUpdate(update);
         };
-        try { await Promise.race([logic(), new Promise((_, r) => setTimeout(() => r(new Error('Timeout')), 4500))]); } catch(e) {}
+        // Increased timeout from 4500 to 9000 to handle cold starts
+        try { await Promise.race([logic(), new Promise((_, r) => setTimeout(() => r(new Error('Timeout')), 9000))]); } catch(e) {}
     }
     res.status(200).send('OK');
 };
