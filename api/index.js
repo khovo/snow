@@ -2,7 +2,7 @@ const { Telegraf, Markup } = require('telegraf');
 const mongoose = require('mongoose');
 
 // ============================================================
-// 1. CONFIGURATION (ቅንብሮች)
+// 1. CONFIGURATION
 // ============================================================
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const MONGODB_URI = process.env.MONGODB_URI;
@@ -12,7 +12,7 @@ if (!BOT_TOKEN) throw new Error('BOT_TOKEN is missing!');
 if (!MONGODB_URI) throw new Error('MONGODB_URI is missing!');
 
 // ============================================================
-// 2. DATABASE SCHEMAS (የዳታ አቀማመጥ)
+// 2. DATABASE SCHEMAS
 // ============================================================
 
 // A. Anti-Duplicate
@@ -29,7 +29,7 @@ const configSchema = new mongoose.Schema({
 });
 const Config = mongoose.models.Config || mongoose.model('Config', configSchema);
 
-// C. User Data (Added isBanned)
+// C. User Data
 const userSchema = new mongoose.Schema({
   userId: { type: String, required: true, unique: true },
   firstName: String,
@@ -37,7 +37,7 @@ const userSchema = new mongoose.Schema({
   bestStreak: { type: Number, default: 0 },
   relapseHistory: [{ date: { type: Date, default: Date.now }, reason: String }],
   lastActive: { type: Date, default: Date.now },
-  isBanned: { type: Boolean, default: false }, // Ban System
+  isBanned: { type: Boolean, default: false },
   adminState: { step: { type: String, default: null }, tempData: { type: mongoose.Schema.Types.Mixed, default: {} } }
 });
 const User = mongoose.models.User || mongoose.model('User', userSchema);
@@ -126,7 +126,7 @@ bot.start(async (ctx) => {
     
     // Check Ban
     const user = await User.findOne({ userId });
-    if (user && user.isBanned) return; // Ignore banned users
+    if (user && user.isBanned) return; 
 
     await User.findOneAndUpdate({ userId }, { firstName, lastActive: new Date() }, { upsert: true });
     if (ADMIN_IDS.includes(userId)) await clearAdminStep(userId);
@@ -188,17 +188,9 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
                 }
 
                 // ... Configs ...
-                if (state.step === 'awaiting_layout') {
-                    const lines = text.split('\n').map(l => l.split(',').map(i => i.trim()).filter(x=>x)).filter(r=>r.length>0);
-                    await Config.findOneAndUpdate({ key: 'keyboard_layout' }, { value: JSON.stringify(lines) }, { upsert: true });
-                    await ctx.reply('✅ Saved!'); await clearAdminStep(userId); return;
-                }
                 if (state.step === 'awaiting_welcome') { await Config.findOneAndUpdate({ key: 'welcome_msg' }, { value: text }, { upsert: true }); await ctx.reply('✅ Saved!'); await clearAdminStep(userId); return; }
-                if (state.step === 'awaiting_urge_name') { await Config.findOneAndUpdate({ key: 'urge_btn_label' }, { value: text }, { upsert: true }); await ctx.reply('✅ Saved!'); await clearAdminStep(userId); return; }
-                if (state.step === 'awaiting_streak_name') { await Config.findOneAndUpdate({ key: 'streak_btn_label' }, { value: text }, { upsert: true }); await ctx.reply('✅ Saved!'); await clearAdminStep(userId); return; }
                 if (state.step === 'awaiting_channel_name') { await setAdminStep(userId, 'awaiting_channel_link', { name: text }); return ctx.reply('🔗 Link:'); }
                 if (state.step === 'awaiting_channel_link') { await Channel.create({ name: state.tempData.name, link: text }); await ctx.reply('✅ Added!'); await clearAdminStep(userId); return; }
-                if (state.step === 'awaiting_motivation') { await Motivation.create({ text }); await ctx.reply('✅ Added!'); await clearAdminStep(userId); return; }
                 
                 // Custom Button
                 if (state.step === 'awaiting_btn_name') { await setAdminStep(userId, 'awaiting_btn_content', { label: text }); return ctx.reply('📥 Content:'); }
@@ -261,7 +253,6 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
             const count = await Motivation.countDocuments();
             if (count === 0) return ctx.reply('Empty.');
             const m = await Motivation.findOne().skip(Math.floor(Math.random() * count));
-            // 10-Minute Rule Message
             return ctx.reply(`⏳ **የ10 ደቂቃ ህግ!**\n\nውሳኔ ከመወሰንህ በፊት እባክህ ለ10 ደቂቃ ብቻ ታገስ። ስሜቱ ማዕበል ነው፣ ይመጣል ይሄዳል።\n\n💡 **ምክር:**\n${m.text}`, { parse_mode: 'Markdown' });
         }
 
@@ -358,16 +349,31 @@ bot.action(/^reply_to_(.+)$/, async ctx => {
     await ctx.answerCbQuery();
 });
 
-// --- STREAK & GROWTH ---
+// --- STREAK & GROWTH (FIXED) ---
 async function handleStreak(ctx) {
-    const userId = String(ctx.from.id);
-    let user = await User.findOne({ userId });
-    if (!user) user = await User.create({ userId, firstName: ctx.from.first_name });
-    const diff = Math.floor(Math.abs(new Date() - user.streakStart) / 86400000);
-    const stage = getGrowthStage(diff); 
-    const name = escapeMarkdown(user.firstName || 'User');
-    const msg = `🔥 *${name}*\n\n📆 Streak: *${diff} Days*\n🌱 Level: *${stage}*\n🏆 Best: ${user.bestStreak}`;
-    await ctx.reply(msg, { parse_mode: 'MarkdownV2', ...Markup.inlineKeyboard([ [Markup.button.callback('💔 ወደቅኩ', `rel_${userId}`)], [Markup.button.callback('🏆 ደረጃ', `led_${userId}`)], [Markup.button.callback('🔄 Refresh', `ref_${userId}`)] ]) });
+    try {
+        const userId = String(ctx.from.id);
+        let user = await User.findOne({ userId });
+        if (!user) user = await User.create({ userId, firstName: ctx.from.first_name });
+        
+        const diff = Math.floor(Math.abs(new Date() - user.streakStart) / 86400000);
+        const stage = getGrowthStage(diff); 
+        
+        // **FIX**: Escape user name and stage to prevent MarkdownV2 crash
+        const name = escapeMarkdown(user.firstName || 'User');
+        const escapedStage = escapeMarkdown(stage);
+        
+        const msg = `🔥 *${name}*\n\n📆 Streak: *${diff} Days*\n🌱 Level: *${escapedStage}*\n🏆 Best: ${user.bestStreak}`;
+        
+        await ctx.reply(msg, {
+            parse_mode: 'MarkdownV2',
+            ...Markup.inlineKeyboard([
+                [Markup.button.callback('💔 ወደቅኩ (Relapse)', `rel_${userId}`)],
+                [Markup.button.callback('🏆 ደረጃ (Leaderboard)', `led_${userId}`)],
+                [Markup.button.callback('🔄 Refresh', `ref_${userId}`)]
+            ])
+        });
+    } catch(e) { console.error("Streak Error:", e); }
 }
 
 // --- ACTIVE LEADERBOARD ---
@@ -391,14 +397,13 @@ bot.action(/^rsn_(.+)_(.+)$/, async ctx => { if(!verify(ctx, ctx.match[2])) retu
 bot.action(/^ref_(.+)$/, async ctx => { if(!verify(ctx, ctx.match[1])) return ctx.answerCbQuery('Not allowed'); try{await ctx.deleteMessage();}catch(e){} await handleStreak(ctx); ctx.answerCbQuery(); });
 bot.action(/^can_(.+)$/, async ctx => { if(!verify(ctx, ctx.match[1])) return ctx.answerCbQuery('Not allowed'); try{await ctx.deleteMessage();}catch(e){} ctx.answerCbQuery(); });
 
-// --- ADMIN PANEL ---
+// --- ADMIN PANEL (UPDATED - REMOVED MOTIVATION/LAYOUT/RENAME) ---
 async function showAdminMenu(ctx) {
     const c = await User.countDocuments();
     const p = await Post.countDocuments({ status: 'pending' });
     await ctx.reply(`⚙️ Admin (Users: ${c})`, Markup.inlineKeyboard([
-        [Markup.button.callback('💪 Motivation', 'man_mot'), Markup.button.callback(`⏳ Pending Posts (${p})`, 'adm_approve')],
+        [Markup.button.callback(`⏳ Pending Posts (${p})`, 'adm_approve')],
         [Markup.button.callback('🔨 Ban User', 'adm_ban'), Markup.button.callback('📝 Start Msg', 'adm_wel')],
-        [Markup.button.callback('🔲 Layout', 'adm_lay'), Markup.button.callback('🏷️ Rename', 'adm_ren')],
         [Markup.button.callback('📢 Channels', 'adm_chan'), Markup.button.callback('🔘 Custom Btn', 'adm_cus')]
     ]));
 }
@@ -416,18 +421,10 @@ bot.action('adm_approve', async ctx => {
 bot.action(/^app_yes_(.+)$/, async ctx => { await Post.findByIdAndUpdate(ctx.match[1], { status: 'approved' }); await ctx.deleteMessage(); await ctx.reply('Approved!'); });
 bot.action(/^app_no_(.+)$/, async ctx => { await Post.findByIdAndDelete(ctx.match[1]); await ctx.deleteMessage(); await ctx.reply('Deleted.'); });
 
-// ... Standard Admin Handlers (Motivation, Layout, etc.) ...
 const ask = (ctx, s, t) => { setAdminStep(String(ctx.from.id), s); ctx.reply(t); ctx.answerCbQuery(); };
 bot.action('man_posts', async ctx => { const posts = await Post.find().sort({ createdAt: -1 }).limit(5); let btns = []; posts.forEach(p => { const preview = p.text.substring(0, 15) + '...'; btns.push([Markup.button.callback(`🗑️ ${preview} (${p.userName})`, `del_post_${p._id}`)]); }); await ctx.editMessageText('Recent Posts:', Markup.inlineKeyboard(btns)); });
 bot.action(/^del_post_(.+)$/, async c => { await Post.findByIdAndDelete(c.match[1]); c.reply('Deleted'); c.answerCbQuery(); });
-bot.action('man_mot', async ctx => { const mots = await Motivation.find().sort({ addedAt: -1 }).limit(5); let btns = [[Markup.button.callback('➕ Add New', 'add_mot')]]; mots.forEach(m => { const preview = m.text.substring(0, 20) + '...'; btns.push([Markup.button.callback(`🗑️ ${preview}`, `del_mot_${m._id}`)]); }); await ctx.editMessageText('Manage Motivations:', Markup.inlineKeyboard(btns)); });
-bot.action('add_mot', c => ask(c, 'awaiting_motivation', 'Text:'));
-bot.action(/^del_mot_(.+)$/, async c => { await Motivation.findByIdAndDelete(c.match[1]); c.reply('Deleted'); c.answerCbQuery(); });
-bot.action('adm_lay', c => ask(c, 'awaiting_layout', 'Layout:'));
 bot.action('adm_wel', c => ask(c, 'awaiting_welcome', 'Msg:'));
-bot.action('adm_ren', c => { c.reply('Which?', Markup.inlineKeyboard([[Markup.button.callback('Urge', 'ren_urg'), Markup.button.callback('Streak', 'ren_str')]])); c.answerCbQuery(); });
-bot.action('ren_urg', c => ask(c, 'awaiting_urge_name', 'Name:'));
-bot.action('ren_str', c => ask(c, 'awaiting_streak_name', 'Name:'));
 bot.action('adm_chan', async c => { const ch = await Channel.find({}); c.editMessageText('Channels:', Markup.inlineKeyboard([[Markup.button.callback('➕ Add', 'add_ch')], ...ch.map(x=>[Markup.button.callback(`🗑️ ${x.name}`, `del_ch_${x._id}`)])])); });
 bot.action('add_ch', c => ask(c, 'awaiting_channel_name', 'Name:'));
 bot.action(/^del_ch_(.+)$/, async c => { await Channel.findByIdAndDelete(c.match[1]); c.reply('Deleted'); c.answerCbQuery(); });
