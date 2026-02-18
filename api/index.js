@@ -378,14 +378,14 @@ bot.action(/^view_post_(.+)$/, async ctx => {
             return ctx.answerCbQuery();
         }
 
-        // FORMATTED DISPLAY
+        // FORMATTED DISPLAY (FIXED MARKDOWN)
         let msg = `👤 *${escapeMarkdown(post.userName)}*\n`;
-        msg += `────────────────\n`;
+        msg += `\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\n`;
         msg += `${escapeMarkdown(post.text)}\n`;
-        msg += `────────────────\n`;
+        msg += `\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\n`;
         
         const replyCount = post.replies ? post.replies.length : 0;
-        msg += `💬 *መልሶች (${replyCount})*\n\n`;
+        msg += `💬 *${escapeMarkdown(`መልሶች (${replyCount})`)}*\n\n`;
 
         if (replyCount > 0) {
             post.replies.forEach((r, idx) => {
