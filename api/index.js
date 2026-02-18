@@ -15,18 +15,21 @@ if (!MONGODB_URI) throw new Error('MONGODB_URI is missing!');
 // 2. DATABASE SCHEMAS
 // ============================================================
 
+// A. Anti-Duplicate
 const processedUpdateSchema = new mongoose.Schema({
   update_id: { type: Number, required: true, unique: true },
   createdAt: { type: Date, default: Date.now, expires: 3600 }
 });
 const ProcessedUpdate = mongoose.models.ProcessedUpdate || mongoose.model('ProcessedUpdate', processedUpdateSchema);
 
+// B. Configs
 const configSchema = new mongoose.Schema({
   key: { type: String, required: true, unique: true },
   value: { type: mongoose.Schema.Types.Mixed, required: true }
 });
 const Config = mongoose.models.Config || mongoose.model('Config', configSchema);
 
+// C. User Data
 const userSchema = new mongoose.Schema({
   userId: { type: String, required: true, unique: true },
   firstName: String,
@@ -44,12 +47,14 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.models.User || mongoose.model('User', userSchema);
 
+// D. Channels
 const channelSchema = new mongoose.Schema({
   name: { type: String, required: true },
   link: { type: String, required: true }
 });
 const Channel = mongoose.models.Channel || mongoose.model('Channel', channelSchema);
 
+// E. Custom Buttons
 const customButtonSchema = new mongoose.Schema({
   label: { type: String, required: true, unique: true },
   type: { type: String, enum: ['text', 'photo', 'video', 'voice'], default: 'text' },
@@ -59,12 +64,14 @@ const customButtonSchema = new mongoose.Schema({
 });
 const CustomButton = mongoose.models.CustomButton || mongoose.model('CustomButton', customButtonSchema);
 
+// F. Motivation
 const motivationSchema = new mongoose.Schema({
   text: { type: String, required: true },
   addedAt: { type: Date, default: Date.now }
 });
 const Motivation = mongoose.models.Motivation || mongoose.model('Motivation', motivationSchema);
 
+// G. Confessions (Auto-Delete after 7 days)
 const postSchema = new mongoose.Schema({
     confessionId: Number,
     userId: String,
@@ -78,6 +85,7 @@ const postSchema = new mongoose.Schema({
 postSchema.index({ createdAt: 1 }, { expireAfterSeconds: 604800 }); 
 const Post = mongoose.models.Post || mongoose.model('Post', postSchema);
 
+// H. Comments (Auto-Delete after 7 days)
 const commentSchema = new mongoose.Schema({
     postId: mongoose.Schema.Types.ObjectId,
     userId: String,
@@ -111,10 +119,8 @@ async function getAdminState(userId) { const user = await User.findOne({ userId 
 async function clearAdminStep(userId) { await User.findOneAndUpdate({ userId }, { adminState: { step: null, tempData: {} } }); }
 async function getConfig(key, def) { const doc = await Config.findOne({ key }); return doc ? doc.value : def; }
 
-// --- FIXED MARKDOWN ESCAPE FUNCTION ---
 function escapeMarkdown(text) {
     if (!text) return '';
-    // Escapes all special characters for MarkdownV2
     return String(text).replace(/[_*[\]()~`>#+\-=|{}.!]/g, '\\$&');
 }
 
@@ -133,6 +139,21 @@ function getGrowthStage(days) {
     return '👑 ንጉስ (Legend)';
 }
 
+// --- CLEAN UI HELPER ---
+async function sendCleanMessage(ctx, text, extra, userId) {
+    const user = await User.findOne({ userId });
+    // Try delete old message
+    if (user && user.lastMenuId) {
+        try { await ctx.deleteMessage(user.lastMenuId); } 
+        catch (e) { /* Ignore if old */ }
+    }
+    // Send new
+    const sent = await ctx.reply(text, extra);
+    // Save new ID
+    await User.findOneAndUpdate({ userId }, { lastMenuId: sent.message_id });
+    return sent;
+}
+
 // ============================================================
 // 5. BOT LOGIC
 // ============================================================
@@ -142,29 +163,29 @@ bot.start(async (ctx) => {
   try {
     const userId = String(ctx.from.id);
     const firstName = ctx.from.first_name || 'Friend';
-    
-    // Check Ban
     const user = await User.findOne({ userId });
     if (user && user.isBanned) return; 
 
-    // CLEAN UP OLD MENU
-    if (user && user.lastMenuId) {
-        try { await ctx.deleteMessage(user.lastMenuId); } catch (e) { /* Ignore if too old */ }
-    }
+    // Update User
+    await User.findOneAndUpdate({ userId }, { firstName, lastActive: new Date() }, { upsert: true });
+    
+    // Clear Admin state on start
+    if (ADMIN_IDS.includes(userId)) await clearAdminStep(userId);
 
+    // Configs
     const urgeLabel = await getConfig('urge_btn_label', '🆘 እርዳኝ');
     const communityLabel = await getConfig('comm_btn_label', '🗣 Confessions');
     const streakLabel = await getConfig('streak_btn_label', '📅 ቀኔን ቁጠር');
     const channelLabel = await getConfig('channel_btn_label', '📢 ቻናሎች');
 
+    // Layout
     const defaultLayout = [[urgeLabel, streakLabel], [communityLabel, channelLabel]];
     let layoutRaw = await getConfig('keyboard_layout', defaultLayout);
     let layout = (typeof layoutRaw === 'string') ? JSON.parse(layoutRaw) : layoutRaw;
 
     const currentLabels = new Set(layout.flat().map(l => l.trim()));
     if (!currentLabels.has(communityLabel)) {
-        if (layout.length >= 2) { layout[1].unshift(communityLabel); } 
-        else { layout.push([communityLabel]); }
+        if (layout.length >= 2) layout[1].unshift(communityLabel); else layout.push([communityLabel]);
     }
 
     const customBtns = await CustomButton.find({});
@@ -178,21 +199,23 @@ bot.start(async (ctx) => {
     });
     if (tempRow.length > 0) layout.push(tempRow);
 
-    if (ADMIN_IDS.includes(userId)) {
+    // Add Admin Panel ONLY if private chat and user is admin
+    if (ADMIN_IDS.includes(userId) && ctx.chat.type === 'private') {
         if (!layout.flat().includes('🔐 Admin Panel')) layout.push(['🔐 Admin Panel']);
     }
 
     const welcomeMsg = await getConfig('welcome_msg', `ሰላም ${firstName}! እንኳን በሰላም መጣህ።`);
     
-    const sentMsg = await ctx.reply(welcomeMsg, Markup.keyboard(layout).resize());
-    await User.findOneAndUpdate({ userId }, { firstName, lastActive: new Date(), lastMenuId: sentMsg.message_id }, { upsert: true });
-    
-    if (ADMIN_IDS.includes(userId)) await clearAdminStep(userId);
+    // Send Clean Menu
+    await sendCleanMessage(ctx, welcomeMsg, Markup.keyboard(layout).resize(), userId);
 
   } catch (e) { console.error(e); }
 });
 
-bot.command('profile', async (ctx) => showProfile(ctx, String(ctx.from.id)));
+bot.command('profile', async (ctx) => {
+    if (ctx.chat.type !== 'private') return ctx.reply('Profile is available in private chat only.');
+    showProfile(ctx, String(ctx.from.id));
+});
 
 bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
     if (!ctx.message) return;
@@ -204,12 +227,12 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
         if (currentUser && currentUser.isBanned) return;
         await User.findOneAndUpdate({ userId }, { lastActive: new Date() });
 
-        // === ADMIN WIZARD ===
-        if (ADMIN_IDS.includes(userId)) {
+        // === ADMIN WIZARD (Private Only) ===
+        if (ADMIN_IDS.includes(userId) && ctx.chat.type === 'private') {
             const state = await getAdminState(userId);
             if (state && state.step) {
                 if (text === '/cancel') { await clearAdminStep(userId); return ctx.reply('❌ Canceled.'); }
-                
+                // Admin Actions ...
                 if (state.step === 'awaiting_ban_id') { await User.findOneAndUpdate({ userId: text.trim() }, { isBanned: true }); await ctx.reply(`🚫 Banned.`); await clearAdminStep(userId); return; }
                 if (state.step === 'awaiting_welcome') { await Config.findOneAndUpdate({ key: 'welcome_msg' }, { value: text }, { upsert: true }); await ctx.reply('✅ Saved!'); await clearAdminStep(userId); return; }
                 if (state.step === 'awaiting_channel_name') { await setAdminStep(userId, 'awaiting_channel_link', { name: text }); return ctx.reply('🔗 Link:'); }
@@ -243,67 +266,77 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
             }
         }
 
-        // === USER STATE ===
-        const userState = await getAdminState(userId);
-        if (userState && userState.step === 'edit_nickname') { await User.findOneAndUpdate({ userId }, { nickname: text }); await clearAdminStep(userId); await ctx.reply('✅ Nickname updated!'); return showProfile(ctx, userId); }
-        if (userState && userState.step === 'edit_bio') { await User.findOneAndUpdate({ userId }, { bio: text }); await clearAdminStep(userId); await ctx.reply('✅ Bio updated!'); return showProfile(ctx, userId); }
-        if (userState && userState.step === 'edit_emoji') { await User.findOneAndUpdate({ userId }, { emoji: text }); await clearAdminStep(userId); await ctx.reply('✅ Emoji updated!'); return showProfile(ctx, userId); }
-        
-        if (userState && userState.step === 'awaiting_confession') {
-            if (text === '/cancel') { await clearAdminStep(userId); return ctx.reply('❌ Canceled.'); }
-            if (!text) return ctx.reply('Text only please.');
-            await Post.create({ userId, authorName: currentUser.nickname || "Anonymous", text: text, status: 'pending' });
-            await clearAdminStep(userId);
-            await ctx.reply('📜 **Received!** Sent to admins.', { parse_mode: 'Markdown' });
-            return;
-        }
-        
-        // COMMENTING
-        if (userState && userState.step === 'awaiting_comment') {
-            if (text === '/cancel') { await clearAdminStep(userId); return ctx.reply('❌ Canceled.'); }
-            const postId = userState.tempData.postId;
-            await Comment.create({ postId, userId, authorName: currentUser.nickname || "Anonymous", text: text });
-            await User.findOneAndUpdate({ userId }, { $inc: { aura: 2 } }); 
-            await clearAdminStep(userId);
-            await ctx.reply('✅ Comment added!');
-            return;
-        }
+        // === USER STATE (Private Only) ===
+        if (ctx.chat.type === 'private') {
+            const userState = await getAdminState(userId);
+            if (userState && userState.step === 'edit_nickname') { await User.findOneAndUpdate({ userId }, { nickname: text }); await clearAdminStep(userId); await ctx.reply('✅ Nickname updated!'); return showProfile(ctx, userId); }
+            if (userState && userState.step === 'edit_bio') { await User.findOneAndUpdate({ userId }, { bio: text }); await clearAdminStep(userId); await ctx.reply('✅ Bio updated!'); return showProfile(ctx, userId); }
+            if (userState && userState.step === 'edit_emoji') { await User.findOneAndUpdate({ userId }, { emoji: text }); await clearAdminStep(userId); await ctx.reply('✅ Emoji updated!'); return showProfile(ctx, userId); }
+            
+            if (userState && userState.step === 'awaiting_confession') {
+                if (text === '/cancel') { await clearAdminStep(userId); return ctx.reply('❌ Canceled.'); }
+                if (!text) return ctx.reply('Text only please.');
+                await Post.create({ userId, authorName: currentUser.nickname || "Anonymous", text: text, status: 'pending' });
+                await clearAdminStep(userId);
+                await ctx.reply('📜 **Received!** Sent to admins.', { parse_mode: 'Markdown' });
+                return;
+            }
+            
+            if (userState && userState.step === 'awaiting_comment') {
+                if (text === '/cancel') { await clearAdminStep(userId); return ctx.reply('❌ Canceled.'); }
+                const postId = userState.tempData.postId;
+                await Comment.create({ postId, userId, authorName: currentUser.nickname || "Anonymous", text: text });
+                await User.findOneAndUpdate({ userId }, { $inc: { aura: 2 } }); 
+                await clearAdminStep(userId);
+                await ctx.reply('✅ Comment added!');
+                return;
+            }
 
-        // REPLY TO COMMENT
-        if (userState && userState.step === 'awaiting_reply_comment') {
-            if (text === '/cancel') { await clearAdminStep(userId); return ctx.reply('❌ Canceled.'); }
-            const commentId = userState.tempData.commentId;
-            const replyName = currentUser.nickname || "Anonymous";
-            await Comment.findByIdAndUpdate(commentId, { 
-                $push: { replies: { authorName: replyName, text: text } } 
-            });
-            await clearAdminStep(userId);
-            await ctx.reply('✅ Reply sent!');
-            return;
+            if (userState && userState.step === 'awaiting_reply_comment') {
+                if (text === '/cancel') { await clearAdminStep(userId); return ctx.reply('❌ Canceled.'); }
+                const commentId = userState.tempData.commentId;
+                const replyName = currentUser.nickname || "Anonymous";
+                await Comment.findByIdAndUpdate(commentId, { $push: { replies: { authorName: replyName, text: text } } });
+                await clearAdminStep(userId);
+                await ctx.reply('✅ Reply sent!');
+                return;
+            }
         }
 
         // === MENU INTERACTIONS ===
-        if (text === '🔐 Admin Panel' && ADMIN_IDS.includes(userId)) return showAdminMenu(ctx);
+        
+        // Admin Panel (Private Only)
+        if (text === '🔐 Admin Panel' && ADMIN_IDS.includes(userId)) {
+            if (ctx.chat.type === 'private') return showAdminMenu(ctx);
+            else return ctx.reply('Admin panel works in private chat only.');
+        }
 
+        // Configurable Buttons (Work Everywhere)
         const urgeLabel = await getConfig('urge_btn_label', '🆘 እርዳኝ');
         if (text === urgeLabel) {
             const count = await Motivation.countDocuments();
             if (count === 0) return ctx.reply('Empty.');
             const m = await Motivation.findOne().skip(Math.floor(Math.random() * count));
-            return ctx.reply(`🛡️ **Stay Strong!**\n\n${m.text}`, { parse_mode: 'Markdown' });
+            return sendCleanMessage(ctx, `🛡️ **Stay Strong!**\n\n${m.text}`, { parse_mode: 'Markdown' }, userId);
         }
 
         const streakLabel = await getConfig('streak_btn_label', '📅 ቀኔን ቁጠር');
         if (text === streakLabel) return handleStreak(ctx);
 
         const communityLabel = await getConfig('comm_btn_label', '🗣 Confessions');
-        if (text === communityLabel) return handleConfessions(ctx);
+        if (text === communityLabel) {
+            // *** RESTRICT CONFESSIONS IN GROUP ***
+            if (ctx.chat.type !== 'private') {
+                return ctx.reply('⚠️ ለምስጢራዊነት ሲባል ይህ አገልግሎት በግል (Private Chat) ብቻ ነው የሚሰራው።\n\n👉 ቦቱን ለማናገር እዚህ ይጫኑ።', Markup.inlineKeyboard([[Markup.button.url('Go to Private Chat', `https://t.me/${ctx.botInfo.username}`)]]));
+            }
+            return handleConfessions(ctx);
+        }
 
         const channelLabel = await getConfig('channel_btn_label', '📢 ቻናሎች');
         if (text === channelLabel) {
             const channels = await Channel.find({});
             const btns = channels.map(c => [Markup.button.url(c.name, c.link)]);
-            return ctx.reply('Channels:', Markup.inlineKeyboard(btns));
+            return sendCleanMessage(ctx, 'Channels:', Markup.inlineKeyboard(btns), userId);
         }
 
         const customBtn = await CustomButton.findOne({ label: text });
@@ -314,10 +347,19 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
                 const linkBtns = customBtn.inlineLinks.map(l => [Markup.button.url(l.label, l.url)]);
                 extra.reply_markup = { inline_keyboard: linkBtns };
             }
-            if (customBtn.type === 'photo') return ctx.replyWithPhoto(customBtn.content, extra);
-            if (customBtn.type === 'video') return ctx.replyWithVideo(customBtn.content, extra);
-            if (customBtn.type === 'voice') return ctx.replyWithVoice(customBtn.content, extra);
-            return ctx.reply(customBtn.content, extra);
+            
+            // Clean up old menu for Text responses, Media sends new msg
+            const user = await User.findOne({ userId });
+            if (user && user.lastMenuId) try { await ctx.deleteMessage(user.lastMenuId); } catch(e){}
+
+            let sent;
+            if (customBtn.type === 'photo') sent = await ctx.replyWithPhoto(customBtn.content, extra);
+            if (customBtn.type === 'video') sent = await ctx.replyWithVideo(customBtn.content, extra);
+            if (customBtn.type === 'voice') sent = await ctx.replyWithVoice(customBtn.content, extra);
+            if (customBtn.type === 'text') sent = await ctx.reply(customBtn.content, extra);
+            
+            if(sent) await User.findOneAndUpdate({ userId }, { lastMenuId: sent.message_id });
+            return;
         }
     } catch (e) { console.error(e); }
 });
@@ -331,7 +373,8 @@ async function showProfile(ctx, userId) {
     const user = await User.findOne({ userId });
     if (!user) return ctx.reply("User not found.");
     const msg = `👤 *Profile*\n\n🏷️ *Name:* ${escapeMarkdown(user.nickname)}\n🎭 *Emoji:* ${user.emoji}\n⚡️ *Aura:* ${user.aura}\n📝 *Bio:* ${escapeMarkdown(user.bio)}`;
-    await ctx.reply(msg, { parse_mode: 'MarkdownV2', ...Markup.inlineKeyboard([[Markup.button.callback('✏️ Edit Name', 'prof_name'), Markup.button.callback('✏️ Edit Bio', 'prof_bio')], [Markup.button.callback('😊 Edit Emoji', 'prof_emoji')]]) });
+    
+    await sendCleanMessage(ctx, msg, { parse_mode: 'MarkdownV2', ...Markup.inlineKeyboard([[Markup.button.callback('✏️ Edit Name', 'prof_name'), Markup.button.callback('✏️ Edit Bio', 'prof_bio')], [Markup.button.callback('😊 Edit Emoji', 'prof_emoji')], [Markup.button.callback('🔙 Back', 'back_to_menu')]]) }, userId);
 }
 bot.action('prof_name', async ctx => { await setAdminStep(String(ctx.from.id), 'edit_nickname'); ctx.reply('Enter nickname:'); ctx.answerCbQuery(); });
 bot.action('prof_bio', async ctx => { await setAdminStep(String(ctx.from.id), 'edit_bio'); ctx.reply('Enter bio:'); ctx.answerCbQuery(); });
@@ -339,20 +382,28 @@ bot.action('prof_emoji', async ctx => { await setAdminStep(String(ctx.from.id), 
 
 // --- CONFESSIONS ---
 async function handleConfessions(ctx) {
-    await ctx.reply(
+    const userId = String(ctx.from.id);
+    await sendCleanMessage(
+        ctx,
         '🗣 **Confessions & Support**',
-        Markup.inlineKeyboard([
-            [Markup.button.callback('📜 Browse Confessions', 'browse_confessions_0')],
-            [Markup.button.callback('➕ Post Confession', 'write_confession')],
-            [Markup.button.callback('👤 My Profile', 'my_profile')],
-            [Markup.button.callback('🔙 Back to Menu', 'back_to_menu')] 
-        ])
+        {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+                [Markup.button.callback('📜 Browse Confessions', 'browse_confessions_0')],
+                [Markup.button.callback('➕ Post Confession', 'write_confession')],
+                [Markup.button.callback('👤 My Profile', 'my_profile')],
+                [Markup.button.callback('🔙 Back to Menu', 'back_to_menu')] 
+            ])
+        },
+        userId
     );
 }
+
 bot.action('back_to_menu', async ctx => {
     try { await ctx.deleteMessage(); } catch (e) {}
     const userId = String(ctx.from.id);
     const welcomeMsg = await getConfig('welcome_msg', `Welcome back!`);
+    
     const urgeLabel = await getConfig('urge_btn_label', '🆘 እርዳኝ');
     const communityLabel = await getConfig('comm_btn_label', '🗣 Confessions');
     const streakLabel = await getConfig('streak_btn_label', '📅 ቀኔን ቁጠር');
@@ -373,8 +424,8 @@ bot.action('back_to_menu', async ctx => {
     if (tempRow.length > 0) layout.push(tempRow);
     if (ADMIN_IDS.includes(userId) && !layout.flat().includes('🔐 Admin Panel')) layout.push(['🔐 Admin Panel']);
 
-    const sent = await ctx.reply(welcomeMsg, Markup.keyboard(layout).resize());
-    await User.findOneAndUpdate({ userId }, { lastMenuId: sent.message_id });
+    await sendCleanMessage(ctx, welcomeMsg, Markup.keyboard(layout).resize(), userId);
+    await ctx.answerCbQuery();
 });
 
 bot.action('my_profile', ctx => showProfile(ctx, String(ctx.from.id)));
@@ -408,11 +459,10 @@ bot.action(/^browse_confessions_(\d+)$/, async ctx => {
     btns.push([Markup.button.callback('🔙 Back', 'back_to_menu')]);
     
     const title = page === 0 ? '👇 Select a Confession:' : `👇 Page ${page + 1}:`;
-    try { await ctx.editMessageText(title, Markup.inlineKeyboard(btns)); } catch (e) { await ctx.reply(title, Markup.inlineKeyboard(btns)); }
+    try { await ctx.editMessageText(title, Markup.inlineKeyboard(btns)); } catch (e) { await sendCleanMessage(ctx, title, Markup.inlineKeyboard(btns), String(ctx.from.id)); }
     await ctx.answerCbQuery();
 });
 
-// Fixed view_conf
 bot.action(/^view_conf_(.+)$/, async ctx => {
     try {
         const post = await Post.findById(ctx.match[1]);
@@ -429,18 +479,29 @@ bot.action(/^view_conf_(.+)$/, async ctx => {
         msg += `────────────────\n`;
         msg += `👤 *${escapeMarkdown(post.authorName)}*`;
 
-        await ctx.reply(msg, {
-            parse_mode: 'MarkdownV2',
-            ...Markup.inlineKeyboard([
-                [
-                    Markup.button.callback(`👍 ${upCount}`, `vote_up_${post._id}`),
-                    Markup.button.callback(`👎 ${downCount}`, `vote_down_${post._id}`),
-                    Markup.button.callback(`💬 Reply`, `add_comment_${post._id}`)
-                ],
-                [Markup.button.callback(`📂 Browse Comments (${commentCount})`, `view_comments_${post._id}_0`)],
-                [Markup.button.callback('🔙 Back', `browse_confessions_0`)]
-            ])
-        });
+        try {
+            await ctx.editMessageText(msg, {
+                parse_mode: 'MarkdownV2',
+                ...Markup.inlineKeyboard([
+                    [
+                        Markup.button.callback(`👍 ${upCount}`, `vote_up_${post._id}`),
+                        Markup.button.callback(`👎 ${downCount}`, `vote_down_${post._id}`),
+                        Markup.button.callback(`💬 Reply`, `add_comment_${post._id}`)
+                    ],
+                    [Markup.button.callback(`📂 Browse Comments (${commentCount})`, `view_comments_${post._id}_0`)],
+                    [Markup.button.callback('🔙 Back', `browse_confessions_0`)]
+                ])
+            });
+        } catch (e) {
+             await sendCleanMessage(ctx, msg, {
+                parse_mode: 'MarkdownV2',
+                ...Markup.inlineKeyboard([
+                    [Markup.button.callback(`👍 ${upCount}`, `vote_up_${post._id}`), Markup.button.callback(`👎 ${downCount}`, `vote_down_${post._id}`), Markup.button.callback(`💬 Reply`, `add_comment_${post._id}`)],
+                    [Markup.button.callback(`📂 Browse Comments (${commentCount})`, `view_comments_${post._id}_0`)],
+                    [Markup.button.callback('🔙 Back', `browse_confessions_0`)]
+                ])
+            }, String(ctx.from.id));
+        }
         await ctx.answerCbQuery();
     } catch(e) { console.error(e); ctx.answerCbQuery("Error"); }
 });
@@ -483,7 +544,6 @@ bot.action(/^add_comment_(.+)$/, async ctx => {
     await ctx.answerCbQuery();
 });
 
-// --- UPDATED VIEW COMMENTS WITH FIXES ---
 bot.action(/^view_comments_([a-f\d]+)_(\d+)$/, async ctx => {
     const postId = ctx.match[1];
     const page = parseInt(ctx.match[2]);
@@ -502,7 +562,6 @@ bot.action(/^view_comments_([a-f\d]+)_(\d+)$/, async ctx => {
     const upCount = c.upvotes ? c.upvotes.length : 0;
     const downCount = c.downvotes ? c.downvotes.length : 0;
 
-    // FIX: Escaping parenthesis for (x/y)
     let msg = `💬 *Comment \\(${page + 1}/${totalComments}\\)*\n\n`;
     msg += `👤 *${escapeMarkdown(c.authorName)}*:\n${escapeMarkdown(c.text)}\n`;
     
@@ -536,7 +595,7 @@ bot.action(/^cvote_(up|down)_([a-f\d]+)_([a-f\d]+)_(\d+)$/, async ctx => {
     const type = ctx.match[1];
     const commentId = ctx.match[2];
     const postId = ctx.match[3];
-    const page = ctx.match[4]; // kept for potential reload
+    const page = ctx.match[4];
     const userId = String(ctx.from.id);
 
     const comment = await Comment.findById(commentId);
@@ -571,7 +630,8 @@ async function handleStreak(ctx) {
         const name = escapeMarkdown(user.nickname === "Anonymous" ? user.firstName : user.nickname);
         const escapedStage = escapeMarkdown(stage);
         const msg = `🔥 *${name}*\n\n📆 Streak: *${diff} Days*\n🌱 Level: *${escapedStage}*\n🏆 Best: ${user.bestStreak}`;
-        await ctx.reply(msg, { parse_mode: 'MarkdownV2', ...Markup.inlineKeyboard([[Markup.button.callback('💔 Relapse', `rel_${userId}`)], [Markup.button.callback('🏆 Leaderboard', `led_${userId}`)], [Markup.button.callback('🔄 Refresh', `ref_${userId}`)], [Markup.button.callback('🔙 Back', `back_to_menu`)]]) });
+        
+        await sendCleanMessage(ctx, msg, { parse_mode: 'MarkdownV2', ...Markup.inlineKeyboard([[Markup.button.callback('💔 Relapse', `rel_${userId}`)], [Markup.button.callback('🏆 Leaderboard', `led_${userId}`)], [Markup.button.callback('🔄 Refresh', `ref_${userId}`)], [Markup.button.callback('🔙 Back', `back_to_menu`)]]) }, userId);
     } catch(e) { console.error("Streak Error:", e); }
 }
 
@@ -601,12 +661,12 @@ bot.action(/^can_(.+)$/, async ctx => { if(!verify(ctx, ctx.match[1])) return ct
 async function showAdminMenu(ctx) {
     const c = await User.countDocuments();
     const p = await Post.countDocuments({ status: 'pending' });
-    await ctx.reply(`⚙️ Admin (Users: ${c})`, Markup.inlineKeyboard([
+    await sendCleanMessage(ctx, `⚙️ Admin (Users: ${c})`, Markup.inlineKeyboard([
         [Markup.button.callback(`⏳ Approvals (${p})`, 'adm_approve')],
         [Markup.button.callback('🔨 Ban', 'adm_ban'), Markup.button.callback('📢 Channel', 'adm_chan')],
         [Markup.button.callback('🔘 Custom', 'adm_cus')],
         [Markup.button.callback('🔙 Back', `back_to_menu`)]
-    ]));
+    ]), String(ctx.from.id));
 }
 
 bot.action('adm_ban', async ctx => { await setAdminStep(String(ctx.from.id), 'awaiting_ban_id'); await ctx.reply('Send User ID:'); await ctx.answerCbQuery(); });
