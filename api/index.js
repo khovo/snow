@@ -223,25 +223,35 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
             if (state && state.step) {
                 if (text === '/cancel') { await clearAdminStep(userId); return ctx.reply('❌ Canceled.'); }
                 
-                // --- SIMPLIFIED BROADCAST (NO LINK WIZARD) ---
+                // --- FIX: BROADCAST WITH BUTTONS ---
                 if (state.step === 'awaiting_broadcast_content') {
-                    // Save necessary info to copy message
+                    // Capture reply_markup (Inline Buttons) if they exist
+                    const replyMarkup = ctx.message.reply_markup;
+
+                    // Save necessary info to copy message AND the markup
                     const broadcastData = {
                         fromChatId: ctx.chat.id,
-                        messageId: ctx.message.message_id
+                        messageId: ctx.message.message_id,
+                        reply_markup: replyMarkup // <--- THIS IS THE FIX
                     };
                     
                     await setAdminStep(userId, 'awaiting_broadcast_confirm', broadcastData);
 
-                    // Show Preview (Copy exact message)
+                    // Show Preview (Copy exact message WITH markup)
                     await ctx.reply('👁 **Preview:**');
                     try {
-                        await ctx.telegram.copyMessage(ctx.chat.id, broadcastData.fromChatId, broadcastData.messageId);
+                        // copyMessage(chatId, fromChatId, messageId, extraOptions)
+                        await ctx.telegram.copyMessage(
+                            ctx.chat.id, 
+                            broadcastData.fromChatId, 
+                            broadcastData.messageId,
+                            { reply_markup: broadcastData.reply_markup } // <--- Pass the buttons
+                        );
                     } catch (e) {
-                        return ctx.reply('❌ Preview Error.');
+                        return ctx.reply('❌ Preview Error (Maybe content type not supported).');
                     }
 
-                    return ctx.reply('✅ ይላክ? /confirm ብለው ያረጋግጡ።');
+                    return ctx.reply('✅ ይላክ? Buttons ካሉት አብረው ይላካሉ።\n\n/confirm ብለው ያረጋግጡ።');
                 }
 
                 if (state.step === 'awaiting_broadcast_confirm') {
@@ -255,9 +265,13 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
                         (async () => {
                             for (const u of users) {
                                 try {
-                                    // copyMessage preserves everything (Text, Media, Captions)
-                                    // NOTE: Forwarded buttons are stripped by Telegram API.
-                                    await bot.telegram.copyMessage(u.userId, data.fromChatId, data.messageId);
+                                    // Pass the stored reply_markup (buttons) to the user
+                                    await bot.telegram.copyMessage(
+                                        u.userId, 
+                                        data.fromChatId, 
+                                        data.messageId,
+                                        { reply_markup: data.reply_markup } // <--- Pass the buttons
+                                    );
                                     success++;
                                 } catch (e) { fail++; }
                                 await new Promise(r => setTimeout(r, 30)); 
@@ -741,5 +755,3 @@ module.exports = async (req, res) => {
     }
     res.status(200).send('OK');
 };
-
-
