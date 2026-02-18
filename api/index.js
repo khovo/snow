@@ -134,15 +134,21 @@ function getGrowthStage(days) {
 // --- CLEAN UI HELPER ---
 async function sendCleanMessage(ctx, text, extra, userId) {
     const user = await User.findOne({ userId });
-    // Try delete old message
-    if (user && user.lastMenuId) {
+    
+    // In Groups, we might not have permission to delete messages or track the last ID correctly per user context
+    // So we wrap in try/catch heavily.
+    if (ctx.chat.type === 'private' && user && user.lastMenuId) {
         try { await ctx.deleteMessage(user.lastMenuId); } 
-        catch (e) { /* Ignore if old */ }
+        catch (e) { /* Ignore if old or fail */ }
     }
+    
     // Send new
     const sent = await ctx.reply(text, extra);
-    // Save new ID
-    await User.findOneAndUpdate({ userId }, { lastMenuId: sent.message_id });
+    
+    // Only save lastMenuId if private, to avoid confusion in groups
+    if (ctx.chat.type === 'private') {
+        await User.findOneAndUpdate({ userId }, { lastMenuId: sent.message_id });
+    }
     return sent;
 }
 
@@ -153,7 +159,8 @@ const bot = new Telegraf(BOT_TOKEN);
 
 bot.start(async (ctx) => {
   try {
-    if (ctx.chat.type !== 'private') return; 
+    // REMOVED: check for private chat. Now allows groups.
+    // if (ctx.chat.type !== 'private') return; 
 
     const userId = String(ctx.from.id);
     const firstName = ctx.from.first_name || 'Friend';
@@ -161,7 +168,9 @@ bot.start(async (ctx) => {
     if (user && user.isBanned) return; 
 
     await User.findOneAndUpdate({ userId }, { firstName, lastActive: new Date() }, { upsert: true });
-    if (ADMIN_IDS.includes(userId)) await clearAdminStep(userId);
+    
+    // Only clear admin step if in private, so group chat doesn't mess up admin wizards
+    if (ctx.chat.type === 'private' && ADMIN_IDS.includes(userId)) await clearAdminStep(userId);
 
     const urgeLabel = await getConfig('urge_btn_label', '🆘 እርዳኝ');
     const communityLabel = await getConfig('comm_btn_label', '🗣 Confessions');
@@ -188,20 +197,20 @@ bot.start(async (ctx) => {
     });
     if (tempRow.length > 0) layout.push(tempRow);
 
-    if (ADMIN_IDS.includes(userId)) {
+    // Only show Admin Panel button in Private Chat
+    if (ctx.chat.type === 'private' && ADMIN_IDS.includes(userId)) {
         if (!layout.flat().includes('🔐 Admin Panel')) layout.push(['🔐 Admin Panel']);
     }
 
     const welcomeMsg = await getConfig('welcome_msg', `ሰላም ${firstName}! እንኳን በሰላም መጣህ።`);
     
-    // Use Clean Message Logic
     await sendCleanMessage(ctx, welcomeMsg, Markup.keyboard(layout).resize(), userId);
 
   } catch (e) { console.error(e); }
 });
 
 bot.command('profile', async (ctx) => {
-    if (ctx.chat.type !== 'private') return;
+    // Profile is personal, prefer private but allowed in group if needed (usually triggers PM)
     showProfile(ctx, String(ctx.from.id));
 });
 
@@ -211,44 +220,41 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
         const userId = String(ctx.from.id);
         const text = ctx.message.text; 
         
-        if (ctx.chat.type !== 'private') return; 
+        // REMOVED: check for private chat to allow group interactions
+        // if (ctx.chat.type !== 'private') return; 
 
         const currentUser = await User.findOne({ userId });
         if (currentUser && currentUser.isBanned) return;
         await User.findOneAndUpdate({ userId }, { lastActive: new Date() });
 
-        // === ADMIN WIZARD ===
-        if (ADMIN_IDS.includes(userId)) {
+        // === ADMIN WIZARD (RESTRICT TO PRIVATE CHAT) ===
+        // Admins should not configure the bot inside a public group
+        if (ctx.chat.type === 'private' && ADMIN_IDS.includes(userId)) {
             const state = await getAdminState(userId);
             if (state && state.step) {
                 if (text === '/cancel') { await clearAdminStep(userId); return ctx.reply('❌ Canceled.'); }
                 
-                // --- FIX: BROADCAST WITH BUTTONS ---
+                // --- BROADCAST WITH BUTTONS ---
                 if (state.step === 'awaiting_broadcast_content') {
-                    // Capture reply_markup (Inline Buttons) if they exist
                     const replyMarkup = ctx.message.reply_markup;
-
-                    // Save necessary info to copy message AND the markup
                     const broadcastData = {
                         fromChatId: ctx.chat.id,
                         messageId: ctx.message.message_id,
-                        reply_markup: replyMarkup // <--- THIS IS THE FIX
+                        reply_markup: replyMarkup 
                     };
                     
                     await setAdminStep(userId, 'awaiting_broadcast_confirm', broadcastData);
 
-                    // Show Preview (Copy exact message WITH markup)
                     await ctx.reply('👁 **Preview:**');
                     try {
-                        // copyMessage(chatId, fromChatId, messageId, extraOptions)
                         await ctx.telegram.copyMessage(
                             ctx.chat.id, 
                             broadcastData.fromChatId, 
                             broadcastData.messageId,
-                            { reply_markup: broadcastData.reply_markup } // <--- Pass the buttons
+                            { reply_markup: broadcastData.reply_markup } 
                         );
                     } catch (e) {
-                        return ctx.reply('❌ Preview Error (Maybe content type not supported).');
+                        return ctx.reply('❌ Preview Error.');
                     }
 
                     return ctx.reply('✅ ይላክ? Buttons ካሉት አብረው ይላካሉ።\n\n/confirm ብለው ያረጋግጡ።');
@@ -265,12 +271,11 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
                         (async () => {
                             for (const u of users) {
                                 try {
-                                    // Pass the stored reply_markup (buttons) to the user
                                     await bot.telegram.copyMessage(
                                         u.userId, 
                                         data.fromChatId, 
                                         data.messageId,
-                                        { reply_markup: data.reply_markup } // <--- Pass the buttons
+                                        { reply_markup: data.reply_markup } 
                                     );
                                     success++;
                                 } catch (e) { fail++; }
@@ -320,43 +325,47 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
             }
         }
 
-        // === USER STATE ===
-        const userState = await getAdminState(userId);
-        if (userState && userState.step === 'edit_nickname') { await User.findOneAndUpdate({ userId }, { nickname: text }); await clearAdminStep(userId); await ctx.reply('✅ Nickname updated!'); return showProfile(ctx, userId); }
-        if (userState && userState.step === 'edit_bio') { await User.findOneAndUpdate({ userId }, { bio: text }); await clearAdminStep(userId); await ctx.reply('✅ Bio updated!'); return showProfile(ctx, userId); }
-        if (userState && userState.step === 'edit_emoji') { await User.findOneAndUpdate({ userId }, { emoji: text }); await clearAdminStep(userId); await ctx.reply('✅ Emoji updated!'); return showProfile(ctx, userId); }
-        
-        if (userState && userState.step === 'awaiting_confession') {
-            if (text === '/cancel') { await clearAdminStep(userId); return ctx.reply('❌ Canceled.'); }
-            if (!text) return ctx.reply('Text only please.');
-            await Post.create({ userId, authorName: currentUser.nickname || "Anonymous", text: text, status: 'pending' });
-            await clearAdminStep(userId);
-            await ctx.reply('📜 **Received!** Sent to admins.', { parse_mode: 'Markdown' });
-            return;
-        }
-        
-        if (userState && userState.step === 'awaiting_comment') {
-            if (text === '/cancel') { await clearAdminStep(userId); return ctx.reply('❌ Canceled.'); }
-            const postId = userState.tempData.postId;
-            await Comment.create({ postId, userId, authorName: currentUser.nickname || "Anonymous", text: text });
-            await User.findOneAndUpdate({ userId }, { $inc: { aura: 2 } }); 
-            await clearAdminStep(userId);
-            await ctx.reply('✅ Comment added!');
-            return;
+        // === USER STATE (Write confession, comment) - PRIVATE ONLY ===
+        // We do not want users sending confessions into the group chat openly
+        if (ctx.chat.type === 'private') {
+            const userState = await getAdminState(userId);
+            if (userState && userState.step === 'edit_nickname') { await User.findOneAndUpdate({ userId }, { nickname: text }); await clearAdminStep(userId); await ctx.reply('✅ Nickname updated!'); return showProfile(ctx, userId); }
+            if (userState && userState.step === 'edit_bio') { await User.findOneAndUpdate({ userId }, { bio: text }); await clearAdminStep(userId); await ctx.reply('✅ Bio updated!'); return showProfile(ctx, userId); }
+            if (userState && userState.step === 'edit_emoji') { await User.findOneAndUpdate({ userId }, { emoji: text }); await clearAdminStep(userId); await ctx.reply('✅ Emoji updated!'); return showProfile(ctx, userId); }
+            
+            if (userState && userState.step === 'awaiting_confession') {
+                if (text === '/cancel') { await clearAdminStep(userId); return ctx.reply('❌ Canceled.'); }
+                if (!text) return ctx.reply('Text only please.');
+                await Post.create({ userId, authorName: currentUser.nickname || "Anonymous", text: text, status: 'pending' });
+                await clearAdminStep(userId);
+                await ctx.reply('📜 **Received!** Sent to admins.', { parse_mode: 'Markdown' });
+                return;
+            }
+            
+            if (userState && userState.step === 'awaiting_comment') {
+                if (text === '/cancel') { await clearAdminStep(userId); return ctx.reply('❌ Canceled.'); }
+                const postId = userState.tempData.postId;
+                await Comment.create({ postId, userId, authorName: currentUser.nickname || "Anonymous", text: text });
+                await User.findOneAndUpdate({ userId }, { $inc: { aura: 2 } }); 
+                await clearAdminStep(userId);
+                await ctx.reply('✅ Comment added!');
+                return;
+            }
+
+            if (userState && userState.step === 'awaiting_reply_comment') {
+                if (text === '/cancel') { await clearAdminStep(userId); return ctx.reply('❌ Canceled.'); }
+                const commentId = userState.tempData.commentId;
+                const replyName = currentUser.nickname || "Anonymous";
+                await Comment.findByIdAndUpdate(commentId, { $push: { replies: { authorName: replyName, text: text } } });
+                await clearAdminStep(userId);
+                await ctx.reply('✅ Reply sent!');
+                return;
+            }
         }
 
-        if (userState && userState.step === 'awaiting_reply_comment') {
-            if (text === '/cancel') { await clearAdminStep(userId); return ctx.reply('❌ Canceled.'); }
-            const commentId = userState.tempData.commentId;
-            const replyName = currentUser.nickname || "Anonymous";
-            await Comment.findByIdAndUpdate(commentId, { $push: { replies: { authorName: replyName, text: text } } });
-            await clearAdminStep(userId);
-            await ctx.reply('✅ Reply sent!');
-            return;
-        }
-
-        // === MENU INTERACTIONS ===
-        if (text === '🔐 Admin Panel' && ADMIN_IDS.includes(userId)) return showAdminMenu(ctx);
+        // === MENU INTERACTIONS (Allowed in Groups) ===
+        // Admin panel button is hidden from layout in groups, but if typed manually, ignore it in groups
+        if (text === '🔐 Admin Panel' && ADMIN_IDS.includes(userId) && ctx.chat.type === 'private') return showAdminMenu(ctx);
 
         const urgeLabel = await getConfig('urge_btn_label', '🆘 እርዳኝ');
         if (text === urgeLabel) {
@@ -371,6 +380,7 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
 
         const communityLabel = await getConfig('comm_btn_label', '🗣 Confessions');
         if (text === communityLabel) {
+            // Force private for confessions
             if (ctx.chat.type !== 'private') {
                 return ctx.reply('⚠️ ለምስጢራዊነት ሲባል ይህ አገልግሎት በግል (Private Chat) ብቻ ነው የሚሰራው።', Markup.inlineKeyboard([[Markup.button.url('Go to Private Chat', `https://t.me/${ctx.botInfo.username}`)]]));
             }
@@ -393,8 +403,11 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
                 extra.reply_markup = { inline_keyboard: linkBtns };
             }
             
-            const user = await User.findOne({ userId });
-            if (user && user.lastMenuId) try { await ctx.deleteMessage(user.lastMenuId); } catch(e){}
+            // Only try to delete menu message in private chat
+            if (ctx.chat.type === 'private') {
+                const user = await User.findOne({ userId });
+                if (user && user.lastMenuId) try { await ctx.deleteMessage(user.lastMenuId); } catch(e){}
+            }
 
             let sent;
             if (customBtn.type === 'photo') sent = await ctx.replyWithPhoto(customBtn.content, extra);
@@ -402,7 +415,7 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
             if (customBtn.type === 'voice') sent = await ctx.replyWithVoice(customBtn.content, extra);
             if (customBtn.type === 'text') sent = await ctx.reply(customBtn.content, extra);
             
-            if(sent) await User.findOneAndUpdate({ userId }, { lastMenuId: sent.message_id });
+            if(sent && ctx.chat.type === 'private') await User.findOneAndUpdate({ userId }, { lastMenuId: sent.message_id });
             return;
         }
     } catch (e) { console.error(e); }
@@ -417,7 +430,15 @@ async function showProfile(ctx, userId) {
     if (!user) return ctx.reply("User not found.");
     const msg = `👤 *Profile*\n\n🏷️ *Name:* ${escapeMarkdown(user.nickname)}\n🎭 *Emoji:* ${user.emoji}\n⚡️ *Aura:* ${user.aura}\n📝 *Bio:* ${escapeMarkdown(user.bio)}`;
     
-    await sendCleanMessage(ctx, msg, { parse_mode: 'MarkdownV2', ...Markup.inlineKeyboard([[Markup.button.callback('✏️ Edit Name', 'prof_name'), Markup.button.callback('✏️ Edit Bio', 'prof_bio')], [Markup.button.callback('😊 Edit Emoji', 'prof_emoji')], [Markup.button.callback('🔙 Back', 'back_to_menu')]]) }, userId);
+    // In Groups, we don't want "Edit" buttons confusing things, but keeping it simple for now is okay.
+    // If clicked in group, the bot will likely prompt in group which is messy.
+    // Ideally, redirect to private.
+    const isPrivate = ctx.chat.type === 'private';
+    const buttons = isPrivate ? 
+        [[Markup.button.callback('✏️ Edit Name', 'prof_name'), Markup.button.callback('✏️ Edit Bio', 'prof_bio')], [Markup.button.callback('😊 Edit Emoji', 'prof_emoji')], [Markup.button.callback('🔙 Back', 'back_to_menu')]] :
+        [[Markup.button.url('Go to Private to Edit', `https://t.me/${ctx.botInfo.username}`)]];
+
+    await sendCleanMessage(ctx, msg, { parse_mode: 'MarkdownV2', ...Markup.inlineKeyboard(buttons) }, userId);
 }
 bot.action('prof_name', async ctx => { await setAdminStep(String(ctx.from.id), 'edit_nickname'); ctx.reply('Enter nickname:'); ctx.answerCbQuery(); });
 bot.action('prof_bio', async ctx => { await setAdminStep(String(ctx.from.id), 'edit_bio'); ctx.reply('Enter bio:'); ctx.answerCbQuery(); });
@@ -455,21 +476,20 @@ bot.action('back_to_menu', async ctx => {
         let layoutRaw = await getConfig('keyboard_layout', defaultLayout);
         let layout = (typeof layoutRaw === 'string') ? JSON.parse(layoutRaw) : layoutRaw;
         
-        // Ensure Community Button
         const currentLabels = new Set(layout.flat().map(l => l.trim()));
         if (!currentLabels.has(communityLabel)) {
             if (layout.length >= 2) layout[1].unshift(communityLabel); else layout.push([communityLabel]);
         }
         
-        // Ensure Admin Button
-        if (ADMIN_IDS.includes(userId) && !layout.flat().includes('🔐 Admin Panel')) layout.push(['🔐 Admin Panel']);
+        if (ADMIN_IDS.includes(userId) && ctx.chat.type === 'private' && !layout.flat().includes('🔐 Admin Panel')) layout.push(['🔐 Admin Panel']);
 
         // Since main menu uses Keyboard (ReplyMarkup) not Inline, we MUST send a new message.
-        // We cannot "edit" an inline menu into a ReplyKeyboard menu.
-        // So we delete old and send new.
         await ctx.deleteMessage();
         const sent = await ctx.reply(welcomeMsg, Markup.keyboard(layout).resize());
-        await User.findOneAndUpdate({ userId }, { lastMenuId: sent.message_id });
+        
+        if (ctx.chat.type === 'private') {
+            await User.findOneAndUpdate({ userId }, { lastMenuId: sent.message_id });
+        }
         
     } catch (e) { 
         // Fallback
@@ -480,6 +500,7 @@ bot.action('back_to_menu', async ctx => {
 
 bot.action('my_profile', ctx => showProfile(ctx, String(ctx.from.id)));
 bot.action('write_confession', async ctx => {
+    if (ctx.chat.type !== 'private') return ctx.reply('Please do this in private chat.');
     await setAdminStep(String(ctx.from.id), 'awaiting_confession');
     await ctx.reply('✍️ Write your confession (Text only):');
     await ctx.answerCbQuery();
@@ -589,6 +610,9 @@ bot.action(/^vote_(up|down)_(.+)$/, async ctx => {
 });
 
 bot.action(/^add_comment_(.+)$/, async ctx => {
+    // Only allow commenting from private chat to handle reply flow correctly
+    if (ctx.chat.type !== 'private') return ctx.reply('Please reply in private chat.', Markup.inlineKeyboard([[Markup.button.url('Go to Private', `https://t.me/${ctx.botInfo.username}`)]]));
+
     await setAdminStep(String(ctx.from.id), 'awaiting_comment', { postId: ctx.match[1] });
     await ctx.reply('✍️ Write your comment (Text only):', { reply_markup: { force_reply: true } });
     await ctx.answerCbQuery();
@@ -661,6 +685,7 @@ bot.action(/^cvote_(up|down)_([a-f\d]+)_([a-f\d]+)_(\d+)$/, async ctx => {
 });
 
 bot.action(/^creply_(.+)$/, async ctx => {
+    if (ctx.chat.type !== 'private') return ctx.reply('Please reply in private chat.', Markup.inlineKeyboard([[Markup.button.url('Go to Private', `https://t.me/${ctx.botInfo.username}`)]]));
     await setAdminStep(String(ctx.from.id), 'awaiting_reply_comment', { commentId: ctx.match[1] });
     await ctx.reply('✍️ Write your reply:', { reply_markup: { force_reply: true } });
     await ctx.answerCbQuery();
