@@ -223,10 +223,9 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
             if (state && state.step) {
                 if (text === '/cancel') { await clearAdminStep(userId); return ctx.reply('❌ Canceled.'); }
                 
-                // --- SIMPLIFIED BROADCAST WIZARD (As Requested) ---
+                // --- SIMPLIFIED BROADCAST (NO LINK WIZARD) ---
                 if (state.step === 'awaiting_broadcast_content') {
-                    // Directly save the message content to broadcast "As Is"
-                    // We save the necessary IDs to use copyMessage later
+                    // Save necessary info to copy message
                     const broadcastData = {
                         fromChatId: ctx.chat.id,
                         messageId: ctx.message.message_id
@@ -234,8 +233,8 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
                     
                     await setAdminStep(userId, 'awaiting_broadcast_confirm', broadcastData);
 
-                    // Show Preview
-                    await ctx.reply('👁 **Preview (ልክ እንደዚህ ይላካል):**');
+                    // Show Preview (Copy exact message)
+                    await ctx.reply('👁 **Preview:**');
                     try {
                         await ctx.telegram.copyMessage(ctx.chat.id, broadcastData.fromChatId, broadcastData.messageId);
                     } catch (e) {
@@ -256,9 +255,8 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
                         (async () => {
                             for (const u of users) {
                                 try {
-                                    // Using copyMessage preserves everything (Text, Media, Captions, Entities)
-                                    // NOTE: Telegram removes Inline Buttons on Forward/Copy from user. 
-                                    // This is an API limitation, not a code bug.
+                                    // copyMessage preserves everything (Text, Media, Captions)
+                                    // NOTE: Forwarded buttons are stripped by Telegram API.
                                     await bot.telegram.copyMessage(u.userId, data.fromChatId, data.messageId);
                                     success++;
                                 } catch (e) { fail++; }
@@ -430,30 +428,39 @@ async function handleConfessions(ctx) {
 }
 
 bot.action('back_to_menu', async ctx => {
-    try { await ctx.deleteMessage(); } catch (e) {}
-    const userId = String(ctx.from.id);
-    const welcomeMsg = await getConfig('welcome_msg', `Welcome back!`);
-    const urgeLabel = await getConfig('urge_btn_label', '🆘 እርዳኝ');
-    const communityLabel = await getConfig('comm_btn_label', '🗣 Confessions');
-    const streakLabel = await getConfig('streak_btn_label', '📅 ቀኔን ቁጠር');
-    const channelLabel = await getConfig('channel_btn_label', '📢 ቻናሎች');
-    const defaultLayout = [[urgeLabel, streakLabel], [communityLabel, channelLabel]];
-    let layoutRaw = await getConfig('keyboard_layout', defaultLayout);
-    let layout = (typeof layoutRaw === 'string') ? JSON.parse(layoutRaw) : layoutRaw;
-    const currentLabels = new Set(layout.flat().map(l => l.trim()));
-    if (!currentLabels.has(communityLabel)) {
-        if (layout.length >= 2) layout[1].unshift(communityLabel); else layout.push([communityLabel]);
-    }
-    const customBtns = await CustomButton.find({});
-    const updatedLabels = new Set(layout.flat().map(l => l.trim())); 
-    let tempRow = [];
-    customBtns.forEach(btn => {
-        if (!updatedLabels.has(btn.label.trim())) { tempRow.push(btn.label); if (tempRow.length === 2) { layout.push(tempRow); tempRow = []; } }
-    });
-    if (tempRow.length > 0) layout.push(tempRow);
-    if (ADMIN_IDS.includes(userId) && !layout.flat().includes('🔐 Admin Panel')) layout.push(['🔐 Admin Panel']);
+    // Edit the message back to Main Menu instead of delete+send
+    try {
+        const userId = String(ctx.from.id);
+        const welcomeMsg = await getConfig('welcome_msg', `Welcome back!`);
+        
+        const urgeLabel = await getConfig('urge_btn_label', '🆘 እርዳኝ');
+        const communityLabel = await getConfig('comm_btn_label', '🗣 Confessions');
+        const streakLabel = await getConfig('streak_btn_label', '📅 ቀኔን ቁጠር');
+        const channelLabel = await getConfig('channel_btn_label', '📢 ቻናሎች');
+        const defaultLayout = [[urgeLabel, streakLabel], [communityLabel, channelLabel]];
+        let layoutRaw = await getConfig('keyboard_layout', defaultLayout);
+        let layout = (typeof layoutRaw === 'string') ? JSON.parse(layoutRaw) : layoutRaw;
+        
+        // Ensure Community Button
+        const currentLabels = new Set(layout.flat().map(l => l.trim()));
+        if (!currentLabels.has(communityLabel)) {
+            if (layout.length >= 2) layout[1].unshift(communityLabel); else layout.push([communityLabel]);
+        }
+        
+        // Ensure Admin Button
+        if (ADMIN_IDS.includes(userId) && !layout.flat().includes('🔐 Admin Panel')) layout.push(['🔐 Admin Panel']);
 
-    await sendCleanMessage(ctx, welcomeMsg, Markup.keyboard(layout).resize(), userId);
+        // Since main menu uses Keyboard (ReplyMarkup) not Inline, we MUST send a new message.
+        // We cannot "edit" an inline menu into a ReplyKeyboard menu.
+        // So we delete old and send new.
+        await ctx.deleteMessage();
+        const sent = await ctx.reply(welcomeMsg, Markup.keyboard(layout).resize());
+        await User.findOneAndUpdate({ userId }, { lastMenuId: sent.message_id });
+        
+    } catch (e) { 
+        // Fallback
+        const sent = await ctx.reply('Menu', Markup.keyboard([['Start']]).resize());
+    }
     await ctx.answerCbQuery();
 });
 
@@ -623,8 +630,6 @@ bot.action(/^view_comments_([a-f\d]+)_(\d+)$/, async ctx => {
 bot.action(/^cvote_(up|down)_([a-f\d]+)_([a-f\d]+)_(\d+)$/, async ctx => {
     const type = ctx.match[1];
     const commentId = ctx.match[2];
-    const postId = ctx.match[3];
-    const page = ctx.match[4];
     const userId = String(ctx.from.id);
 
     const comment = await Comment.findById(commentId);
