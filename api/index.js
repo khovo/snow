@@ -72,7 +72,7 @@ const postSchema = new mongoose.Schema({
     userName: String,
     text: String,
     status: { type: String, enum: ['pending', 'approved'], default: 'pending' },
-    replies: [{ userName: String, text: String, date: { type: Date, default: Date.now } }],
+    replies: [{ userId: String, userName: String, text: String, date: { type: Date, default: Date.now } }],
     createdAt: { type: Date, default: Date.now }
 });
 const Post = mongoose.models.Post || mongoose.model('Post', postSchema);
@@ -96,9 +96,13 @@ async function setAdminStep(userId, step, data = {}) { await User.findOneAndUpda
 async function getAdminState(userId) { const user = await User.findOne({ userId }); return user ? user.adminState : { step: null, tempData: {} }; }
 async function clearAdminStep(userId) { await User.findOneAndUpdate({ userId }, { adminState: { step: null, tempData: {} } }); }
 async function getConfig(key, def) { const doc = await Config.findOne({ key }); return doc ? doc.value : def; }
-function escapeMarkdown(text) { if (!text) return ''; return text.replace(/[_*[\]()~`>#+\-=|{}.!]/g, '\\$&'); }
 
-// --- DETAILED GROWTH STAGES ---
+// Robust MarkdownV2 Escaping (Crucial for preventing crashes)
+function escapeMarkdown(text) {
+    if (!text) return '';
+    return text.replace(/[_*[\]()~`>#+\-=|{}.!]/g, '\\$&');
+}
+
 function getGrowthStage(days) {
     if (days < 3) return '🌱 ዘር (Seed)';
     if (days < 7) return '🌿 ቡቃያ (Sprout)';
@@ -140,20 +144,14 @@ bot.start(async (ctx) => {
     let layoutRaw = await getConfig('keyboard_layout', defaultLayout);
     let layout = (typeof layoutRaw === 'string') ? JSON.parse(layoutRaw) : layoutRaw;
 
-    // *** FIX: Force Community Button if missing ***
-    // (This fixes the issue where old saved layouts don't have the new button)
+    // Force Add Community Button if missing
     const currentLabels = new Set(layout.flat().map(l => l.trim()));
     if (!currentLabels.has(communityLabel)) {
-        // If layout has at least 2 rows, add to 2nd row, else add new row
-        if (layout.length >= 2) {
-            layout[1].unshift(communityLabel);
-        } else {
-            layout.push([communityLabel]);
-        }
+        if (layout.length >= 2) { layout[1].unshift(communityLabel); } 
+        else { layout.push([communityLabel]); }
     }
 
     const customBtns = await CustomButton.find({});
-    // Re-check existing labels including the newly added community label
     const updatedLabels = new Set(layout.flat().map(l => l.trim())); 
     let tempRow = [];
     customBtns.forEach(btn => {
@@ -183,7 +181,6 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
         const currentUser = await User.findOne({ userId });
         if (currentUser && currentUser.isBanned) return;
 
-        // Activity Update
         await User.findOneAndUpdate({ userId }, { lastActive: new Date() });
 
         // === ADMIN WIZARD ===
@@ -192,20 +189,16 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
             if (state && state.step) {
                 if (text === '/cancel') { await clearAdminStep(userId); return ctx.reply('❌ ሂደቱ ተሰርዟል።'); }
                 
-                // Ban User Step
                 if (state.step === 'awaiting_ban_id') {
                     if (!text) return ctx.reply('ID ቁጥር ብቻ።');
                     await User.findOneAndUpdate({ userId: text.trim() }, { isBanned: true });
                     await ctx.reply(`🚫 User ${text} has been BANNED.`);
                     await clearAdminStep(userId); return;
                 }
-
-                // Configs (Only Welcome and Channels/Custom Btns remain)
                 if (state.step === 'awaiting_welcome') { await Config.findOneAndUpdate({ key: 'welcome_msg' }, { value: text }, { upsert: true }); await ctx.reply('✅ Saved!'); await clearAdminStep(userId); return; }
                 if (state.step === 'awaiting_channel_name') { await setAdminStep(userId, 'awaiting_channel_link', { name: text }); return ctx.reply('🔗 Link:'); }
                 if (state.step === 'awaiting_channel_link') { await Channel.create({ name: state.tempData.name, link: text }); await ctx.reply('✅ Added!'); await clearAdminStep(userId); return; }
                 
-                // Custom Button
                 if (state.step === 'awaiting_btn_name') { await setAdminStep(userId, 'awaiting_btn_content', { label: text }); return ctx.reply('📥 Content:'); }
                 if (state.step === 'awaiting_btn_content') {
                     let type = 'text', content = '', caption = ctx.message.caption || '';
@@ -237,6 +230,8 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
 
         // === USER POSTING ===
         const userState = await getAdminState(userId);
+        
+        // 1. New Post
         if (userState && userState.step === 'awaiting_post_text') {
             if (text === '/cancel') { await clearAdminStep(userId); return ctx.reply('❌ ተሰርዟል።'); }
             if (!text) return ctx.reply('ፅሁፍ ብቻ ነው የሚቻለው።');
@@ -246,15 +241,36 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
                 [Markup.button.callback('🕵️ በድብቅ', 'post_hide_name')]
             ]));
         }
+        
+        // 2. Replying to Post
         if (userState && userState.step === 'awaiting_reply_text') {
             if (text === '/cancel') { await clearAdminStep(userId); return ctx.reply('❌ ተሰርዟል።'); }
             if (!text) return ctx.reply('ፅሁፍ ብቻ።');
             
             const postId = userState.tempData.postId;
             const replyName = (ctx.from.first_name || 'User');
-            await Post.findByIdAndUpdate(postId, { $push: { replies: { userName: replyName, text: text } } });
+            
+            // Add reply to DB
+            const updatedPost = await Post.findByIdAndUpdate(postId, { 
+                $push: { replies: { userId: userId, userName: replyName, text: text } } 
+            }, { new: true });
+
             await clearAdminStep(userId);
             await ctx.reply('✅ መልስዎ ተጨምሯል!');
+
+            // --- NOTIFICATION SYSTEM ---
+            // Notify the original author
+            if (updatedPost && updatedPost.userId && updatedPost.userId !== userId) {
+                try {
+                    await bot.telegram.sendMessage(
+                        updatedPost.userId, 
+                        `🔔 **አዲስ ምላሽ!**\n\nአንድ ሰው ለፃፉት ፅሁፍ መልስ ሰጥቷል:\n\n💬 "${escapeMarkdown(text)}"`,
+                        { parse_mode: 'MarkdownV2' }
+                    );
+                } catch (err) {
+                    console.log("Failed to notify user (blocked bot?)", err.message);
+                }
+            }
             return;
         }
 
@@ -266,14 +282,12 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
             const count = await Motivation.countDocuments();
             if (count === 0) return ctx.reply('Empty.');
             const m = await Motivation.findOne().skip(Math.floor(Math.random() * count));
-            // 10-Minute Rule Message is here!
             return ctx.reply(`⏳ **የ10 ደቂቃ ህግ!**\n\nውሳኔ ከመወሰንህ በፊት እባክህ ለ10 ደቂቃ ብቻ ታገስ። ስሜቱ ማዕበል ነው፣ ይመጣል ይሄዳል።\n\n💡 **ምክር:**\n${m.text}`, { parse_mode: 'Markdown' });
         }
 
         const streakLabel = await getConfig('streak_btn_label', '📅 ቀኔን ቁጠር');
         if (text === streakLabel) return handleStreak(ctx);
 
-        // Community Wall Handler
         const communityLabel = await getConfig('comm_btn_label', '💬 የጥንካሬ መድረክ');
         if (text === communityLabel) return handleCommunity(ctx);
 
@@ -336,29 +350,60 @@ async function postFinalize(ctx, isAnon) {
 }
 
 bot.action('read_posts', async ctx => {
+    // Show APPROVED posts only
     const posts = await Post.find({ status: 'approved' }).sort({ createdAt: -1 }).limit(10);
-    if (posts.length === 0) { await ctx.reply('ምንም ፅሁፍ የለም።'); return ctx.answerCbQuery(); }
+    
+    if (posts.length === 0) { 
+        await ctx.reply('ለጊዜው ምንም ፅሁፍ የለም።'); 
+        return ctx.answerCbQuery(); 
+    }
+    
     let btns = [];
     posts.forEach(p => {
-        const preview = p.text.substring(0, 20) + '...';
-        btns.push([Markup.button.callback(`📝 ${preview}`, `view_post_${p._id}`)]);
+        // Safe preview
+        let preview = p.text.length > 20 ? p.text.substring(0, 20) + '...' : p.text;
+        preview = `${p.userName}: ${preview}`;
+        btns.push([Markup.button.callback(preview, `view_post_${p._id}`)]);
     });
-    await ctx.reply('የቅርብ ፅሁፎች:', Markup.inlineKeyboard(btns));
+    
+    await ctx.reply('👇 ለመክፈት ይጫኑ:', Markup.inlineKeyboard(btns));
     await ctx.answerCbQuery();
 });
 
 bot.action(/^view_post_(.+)$/, async ctx => {
     try {
         const post = await Post.findById(ctx.match[1]);
-        if (!post) return ctx.answerCbQuery('Deleted.');
-        let msg = `👤 *${escapeMarkdown(post.userName)}*\n\n${escapeMarkdown(post.text)}\n\n`;
-        if (post.replies && post.replies.length > 0) {
-            msg += `--- 🗣 Replies ---\n`;
-            post.replies.forEach(r => msg += `🔸 *${escapeMarkdown(r.userName)}*: ${escapeMarkdown(r.text)}\n`);
+        if (!post) {
+            await ctx.reply('ይህ ፅሁፍ ጠፍቷል።');
+            return ctx.answerCbQuery();
         }
-        await ctx.reply(msg, { parse_mode: 'MarkdownV2', ...Markup.inlineKeyboard([[Markup.button.callback('↩️ መልስ ስጥ', `reply_to_${post._id}`)]]) });
+
+        // FORMATTED DISPLAY
+        let msg = `👤 *${escapeMarkdown(post.userName)}*\n`;
+        msg += `────────────────\n`;
+        msg += `${escapeMarkdown(post.text)}\n`;
+        msg += `────────────────\n`;
+        
+        const replyCount = post.replies ? post.replies.length : 0;
+        msg += `💬 *መልሶች (${replyCount})*\n\n`;
+
+        if (replyCount > 0) {
+            post.replies.forEach((r, idx) => {
+                msg += `🔸 *${escapeMarkdown(r.userName)}*:\n${escapeMarkdown(r.text)}\n\n`;
+            });
+        } else {
+            msg += `_እስካሁን ምንም መልስ የለም_\n`;
+        }
+
+        await ctx.reply(msg, { 
+            parse_mode: 'MarkdownV2', 
+            ...Markup.inlineKeyboard([[Markup.button.callback('↩️ መልስ ስጥ (Reply)', `reply_to_${post._id}`)]]) 
+        });
         await ctx.answerCbQuery();
-    } catch(e) {}
+    } catch(e) { 
+        console.error(e);
+        ctx.answerCbQuery('Error displaying post');
+    }
 });
 
 bot.action(/^reply_to_(.+)$/, async ctx => {
@@ -367,7 +412,7 @@ bot.action(/^reply_to_(.+)$/, async ctx => {
     await ctx.answerCbQuery();
 });
 
-// --- STREAK & GROWTH (FIXED) ---
+// --- STREAK & GROWTH ---
 async function handleStreak(ctx) {
     try {
         const userId = String(ctx.from.id);
@@ -377,7 +422,6 @@ async function handleStreak(ctx) {
         const diff = Math.floor(Math.abs(new Date() - user.streakStart) / 86400000);
         const stage = getGrowthStage(diff); 
         
-        // **FIX**: Escape user name and stage to prevent MarkdownV2 crash
         const name = escapeMarkdown(user.firstName || 'User');
         const escapedStage = escapeMarkdown(stage);
         
@@ -394,27 +438,22 @@ async function handleStreak(ctx) {
     } catch(e) { console.error("Streak Error:", e); }
 }
 
-// --- ACTIVE LEADERBOARD (FIXED) ---
+// --- ACTIVE LEADERBOARD ---
 bot.action(/^led_(.+)$/, async ctx => {
     try {
         const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
         const topUsers = await User.find({ lastActive: { $gte: sevenDaysAgo } }).sort({ streakStart: 1 }).limit(10);
-        // Fixed: Escape parenthesis and dot
         let msg = '🏆 *Top 10 Active Warriors* 🏆\n_\\(Last 7 Days\\)_\n\n';
         if (topUsers.length === 0) msg += "No active users\\.";
 
         topUsers.forEach((u, i) => {
             const d = Math.floor(Math.abs(new Date() - u.streakStart) / 86400000);
-            // Fixed: Substring first then escape
             const cleanName = (u.firstName || 'User').substring(0, 15);
             const name = escapeMarkdown(cleanName);
             msg += `${i+1}\\. ${name} — *${d} days*\n`;
         });
         await ctx.editMessageText(msg, { parse_mode: 'MarkdownV2', ...Markup.inlineKeyboard([[Markup.button.callback('🔙 Back', `ref_${ctx.match[1]}`)]]) });
-    } catch (e) { 
-        console.error("Led Error:", e);
-        ctx.answerCbQuery("Error"); 
-    }
+    } catch (e) { ctx.answerCbQuery("Error"); }
 });
 
 const verify = (ctx, id) => String(ctx.from.id) === id;
@@ -423,7 +462,7 @@ bot.action(/^rsn_(.+)_(.+)$/, async ctx => { if(!verify(ctx, ctx.match[2])) retu
 bot.action(/^ref_(.+)$/, async ctx => { if(!verify(ctx, ctx.match[1])) return ctx.answerCbQuery('Not allowed'); try{await ctx.deleteMessage();}catch(e){} await handleStreak(ctx); ctx.answerCbQuery(); });
 bot.action(/^can_(.+)$/, async ctx => { if(!verify(ctx, ctx.match[1])) return ctx.answerCbQuery('Not allowed'); try{await ctx.deleteMessage();}catch(e){} ctx.answerCbQuery(); });
 
-// --- ADMIN PANEL (CLEANED) ---
+// --- ADMIN PANEL ---
 async function showAdminMenu(ctx) {
     const c = await User.countDocuments();
     const p = await Post.countDocuments({ status: 'pending' });
@@ -434,7 +473,6 @@ async function showAdminMenu(ctx) {
     ]));
 }
 
-// Admin Logic (Ban, Approve, Manage)
 bot.action('adm_ban', async ctx => { await setAdminStep(String(ctx.from.id), 'awaiting_ban_id'); await ctx.reply('ለማገድ (Ban) የሰውን User ID ላክ:'); await ctx.answerCbQuery(); });
 
 bot.action('adm_approve', async ctx => {
