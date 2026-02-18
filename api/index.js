@@ -2,7 +2,7 @@ const { Telegraf, Markup } = require('telegraf');
 const mongoose = require('mongoose');
 
 // ============================================================
-// 1. CONFIGURATION
+// 1. CONFIGURATION (ቅንብሮች)
 // ============================================================
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const MONGODB_URI = process.env.MONGODB_URI;
@@ -12,21 +12,24 @@ if (!BOT_TOKEN) throw new Error('BOT_TOKEN is missing!');
 if (!MONGODB_URI) throw new Error('MONGODB_URI is missing!');
 
 // ============================================================
-// 2. DATABASE SCHEMAS
+// 2. DATABASE SCHEMAS (የዳታ አቀማመጥ)
 // ============================================================
 
+// A. Anti-Duplicate
 const processedUpdateSchema = new mongoose.Schema({
   update_id: { type: Number, required: true, unique: true },
   createdAt: { type: Date, default: Date.now, expires: 3600 }
 });
 const ProcessedUpdate = mongoose.models.ProcessedUpdate || mongoose.model('ProcessedUpdate', processedUpdateSchema);
 
+// B. Configs
 const configSchema = new mongoose.Schema({
   key: { type: String, required: true, unique: true },
   value: { type: mongoose.Schema.Types.Mixed, required: true }
 });
 const Config = mongoose.models.Config || mongoose.model('Config', configSchema);
 
+// C. User Data (Added isBanned)
 const userSchema = new mongoose.Schema({
   userId: { type: String, required: true, unique: true },
   firstName: String,
@@ -34,16 +37,19 @@ const userSchema = new mongoose.Schema({
   bestStreak: { type: Number, default: 0 },
   relapseHistory: [{ date: { type: Date, default: Date.now }, reason: String }],
   lastActive: { type: Date, default: Date.now },
+  isBanned: { type: Boolean, default: false }, // Ban System
   adminState: { step: { type: String, default: null }, tempData: { type: mongoose.Schema.Types.Mixed, default: {} } }
 });
 const User = mongoose.models.User || mongoose.model('User', userSchema);
 
+// D. Channels
 const channelSchema = new mongoose.Schema({
   name: { type: String, required: true },
   link: { type: String, required: true }
 });
 const Channel = mongoose.models.Channel || mongoose.model('Channel', channelSchema);
 
+// E. Custom Buttons
 const customButtonSchema = new mongoose.Schema({
   label: { type: String, required: true, unique: true },
   type: { type: String, enum: ['text', 'photo', 'video', 'voice'], default: 'text' },
@@ -53,11 +59,23 @@ const customButtonSchema = new mongoose.Schema({
 });
 const CustomButton = mongoose.models.CustomButton || mongoose.model('CustomButton', customButtonSchema);
 
+// F. Motivation
 const motivationSchema = new mongoose.Schema({
   text: { type: String, required: true },
   addedAt: { type: Date, default: Date.now }
 });
 const Motivation = mongoose.models.Motivation || mongoose.model('Motivation', motivationSchema);
+
+// G. Community Posts
+const postSchema = new mongoose.Schema({
+    userId: String,
+    userName: String,
+    text: String,
+    status: { type: String, enum: ['pending', 'approved'], default: 'pending' },
+    replies: [{ userName: String, text: String, date: { type: Date, default: Date.now } }],
+    createdAt: { type: Date, default: Date.now }
+});
+const Post = mongoose.models.Post || mongoose.model('Post', postSchema);
 
 // ============================================================
 // 3. DB CONNECTION
@@ -74,24 +92,26 @@ async function connectToDatabase() {
 // ============================================================
 // 4. HELPER FUNCTIONS
 // ============================================================
-async function setAdminStep(userId, step, data = {}) {
-    await User.findOneAndUpdate({ userId }, { adminState: { step, tempData: data } }, { upsert: true });
-}
-async function getAdminState(userId) {
-    const user = await User.findOne({ userId });
-    return user ? user.adminState : { step: null, tempData: {} };
-}
-async function clearAdminStep(userId) {
-    await User.findOneAndUpdate({ userId }, { adminState: { step: null, tempData: {} } });
-}
-async function getConfig(key, def) {
-    const doc = await Config.findOne({ key });
-    return doc ? doc.value : def;
-}
-// Robust MarkdownV2 Escaping
-function escapeMarkdown(text) {
-    if (!text) return '';
-    return text.replace(/[_*[\]()~`>#+\-=|{}.!]/g, '\\$&');
+async function setAdminStep(userId, step, data = {}) { await User.findOneAndUpdate({ userId }, { adminState: { step, tempData: data } }, { upsert: true }); }
+async function getAdminState(userId) { const user = await User.findOne({ userId }); return user ? user.adminState : { step: null, tempData: {} }; }
+async function clearAdminStep(userId) { await User.findOneAndUpdate({ userId }, { adminState: { step: null, tempData: {} } }); }
+async function getConfig(key, def) { const doc = await Config.findOne({ key }); return doc ? doc.value : def; }
+function escapeMarkdown(text) { if (!text) return ''; return text.replace(/[_*[\]()~`>#+\-=|{}.!]/g, '\\$&'); }
+
+// --- DETAILED GROWTH STAGES ---
+function getGrowthStage(days) {
+    if (days < 3) return '🌱 ዘር (Seed)';
+    if (days < 7) return '🌿 ቡቃያ (Sprout)';
+    if (days < 14) return '🪴 ተከላ (Planting)';
+    if (days < 21) return '🌳 ትንሹ ዛፍ (Sapling)';
+    if (days < 30) return '🎋 የፅናት ዛፍ (Persistence)';
+    if (days < 40) return '🌲 ስር የሰደደ (Deep Rooted)';
+    if (days < 50) return '🪵 ጠንካራ ግንድ (Strong Trunk)';
+    if (days < 60) return '🍃 ለምለም (Flourishing)';
+    if (days < 70) return '🌸 አበቦች (Flowering)';
+    if (days < 80) return '🍒 ፍሬያማ (Fruiting)';
+    if (days < 90) return '🌳 የዋርካ ጥላ (Canopy)';
+    return '👑 ንጉስ (Legend)';
 }
 
 // ============================================================
@@ -103,14 +123,20 @@ bot.start(async (ctx) => {
   try {
     const userId = String(ctx.from.id);
     const firstName = ctx.from.first_name || 'Friend';
+    
+    // Check Ban
+    const user = await User.findOne({ userId });
+    if (user && user.isBanned) return; // Ignore banned users
+
     await User.findOneAndUpdate({ userId }, { firstName, lastActive: new Date() }, { upsert: true });
     if (ADMIN_IDS.includes(userId)) await clearAdminStep(userId);
 
     const urgeLabel = await getConfig('urge_btn_label', '🆘 እርዳኝ');
-    const channelLabel = await getConfig('channel_btn_label', '📢 ቻናሎች');
+    const communityLabel = await getConfig('comm_btn_label', '💬 የጥንካሬ መድረክ');
     const streakLabel = await getConfig('streak_btn_label', '📅 ቀኔን ቁጠር');
+    const channelLabel = await getConfig('channel_btn_label', '📢 ቻናሎች');
 
-    const defaultLayout = [[urgeLabel, streakLabel], [channelLabel]];
+    const defaultLayout = [[urgeLabel, streakLabel], [communityLabel, channelLabel]];
     let layoutRaw = await getConfig('keyboard_layout', defaultLayout);
     let layout = (typeof layoutRaw === 'string') ? JSON.parse(layoutRaw) : layoutRaw;
 
@@ -139,43 +165,52 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
     try {
         const userId = String(ctx.from.id);
         const text = ctx.message.text; 
+        
+        // BAN CHECK
+        const currentUser = await User.findOne({ userId });
+        if (currentUser && currentUser.isBanned) return;
+
+        // Activity Update
+        await User.findOneAndUpdate({ userId }, { lastActive: new Date() });
 
         // === ADMIN WIZARD ===
         if (ADMIN_IDS.includes(userId)) {
             const state = await getAdminState(userId);
             if (state && state.step) {
-                if (text === '/cancel') {
-                    await clearAdminStep(userId);
-                    return ctx.reply('❌ ሂደቱ ተሰርዟል።');
-                }
+                if (text === '/cancel') { await clearAdminStep(userId); return ctx.reply('❌ ሂደቱ ተሰርዟል።'); }
                 
-                // Configs
+                // Ban User Step
+                if (state.step === 'awaiting_ban_id') {
+                    if (!text) return ctx.reply('ID ቁጥር ብቻ።');
+                    await User.findOneAndUpdate({ userId: text.trim() }, { isBanned: true });
+                    await ctx.reply(`🚫 User ${text} has been BANNED.`);
+                    await clearAdminStep(userId); return;
+                }
+
+                // ... Configs ...
                 if (state.step === 'awaiting_layout') {
                     const lines = text.split('\n').map(l => l.split(',').map(i => i.trim()).filter(x=>x)).filter(r=>r.length>0);
                     await Config.findOneAndUpdate({ key: 'keyboard_layout' }, { value: JSON.stringify(lines) }, { upsert: true });
-                    await ctx.reply('✅ Layout Saved! /start'); await clearAdminStep(userId); return;
+                    await ctx.reply('✅ Saved!'); await clearAdminStep(userId); return;
                 }
                 if (state.step === 'awaiting_welcome') { await Config.findOneAndUpdate({ key: 'welcome_msg' }, { value: text }, { upsert: true }); await ctx.reply('✅ Saved!'); await clearAdminStep(userId); return; }
                 if (state.step === 'awaiting_urge_name') { await Config.findOneAndUpdate({ key: 'urge_btn_label' }, { value: text }, { upsert: true }); await ctx.reply('✅ Saved!'); await clearAdminStep(userId); return; }
                 if (state.step === 'awaiting_streak_name') { await Config.findOneAndUpdate({ key: 'streak_btn_label' }, { value: text }, { upsert: true }); await ctx.reply('✅ Saved!'); await clearAdminStep(userId); return; }
-                
-                // Content
                 if (state.step === 'awaiting_channel_name') { await setAdminStep(userId, 'awaiting_channel_link', { name: text }); return ctx.reply('🔗 Link:'); }
                 if (state.step === 'awaiting_channel_link') { await Channel.create({ name: state.tempData.name, link: text }); await ctx.reply('✅ Added!'); await clearAdminStep(userId); return; }
-                
                 if (state.step === 'awaiting_motivation') { await Motivation.create({ text }); await ctx.reply('✅ Added!'); await clearAdminStep(userId); return; }
-
-                // Custom Button Wizard
-                if (state.step === 'awaiting_btn_name') { await setAdminStep(userId, 'awaiting_btn_content', { label: text }); return ctx.reply('📥 Content (Text/Photo/Video/Voice):'); }
+                
+                // Custom Button
+                if (state.step === 'awaiting_btn_name') { await setAdminStep(userId, 'awaiting_btn_content', { label: text }); return ctx.reply('📥 Content:'); }
                 if (state.step === 'awaiting_btn_content') {
                     let type = 'text', content = '', caption = ctx.message.caption || '';
                     if (ctx.message.voice) { type = 'voice'; content = ctx.message.voice.file_id; }
                     else if (ctx.message.photo) { type = 'photo'; content = ctx.message.photo[ctx.message.photo.length - 1].file_id; }
                     else if (ctx.message.video) { type = 'video'; content = ctx.message.video.file_id; }
                     else if (text) { content = text; }
-                    else return ctx.reply('⚠️ Invalid Content.');
+                    else return ctx.reply('Invalid.');
                     await setAdminStep(userId, 'awaiting_btn_links', { label: state.tempData.label, type, content, caption });
-                    return ctx.reply('🔗 Links? (Send "No" to skip)\nFormat: Name - Link');
+                    return ctx.reply('🔗 Links? (Send "No" to skip)');
                 }
                 if (state.step === 'awaiting_btn_links') {
                     let inlineLinks = [];
@@ -184,24 +219,41 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
                         for (let line of lines) {
                             const parts = line.split('-');
                             if (parts.length >= 2) {
-                                const label = parts[0].trim();
-                                const url = parts.slice(1).join('-').trim();
+                                const label = parts[0].trim(); const url = parts.slice(1).join('-').trim();
                                 if (label && url.startsWith('http')) inlineLinks.push({ label, url });
-                            } else if (line.startsWith('http')) {
-                                inlineLinks.push({ label: '🔗 Open Link', url: line.trim() });
-                            }
+                            } else if (line.startsWith('http')) inlineLinks.push({ label: '🔗 Open Link', url: line.trim() });
                         }
                     }
-                    try {
-                        await CustomButton.findOneAndUpdate({ label: state.tempData.label }, { type: state.tempData.type, content: state.tempData.content, caption: state.tempData.caption, inlineLinks: inlineLinks }, { upsert: true, new: true });
-                        await ctx.reply(`✅ Button "${state.tempData.label}" Created!`);
-                    } catch (e) { await ctx.reply('❌ Error.'); }
-                    await clearAdminStep(userId); return;
+                    await CustomButton.findOneAndUpdate({ label: state.tempData.label }, { type: state.tempData.type, content: state.tempData.content, caption: state.tempData.caption, inlineLinks: inlineLinks }, { upsert: true, new: true });
+                    await ctx.reply(`✅ Created!`); await clearAdminStep(userId); return;
                 }
             }
         }
 
-        // === USER LOGIC ===
+        // === USER POSTING ===
+        const userState = await getAdminState(userId);
+        if (userState && userState.step === 'awaiting_post_text') {
+            if (text === '/cancel') { await clearAdminStep(userId); return ctx.reply('❌ ተሰርዟል።'); }
+            if (!text) return ctx.reply('ፅሁፍ ብቻ ነው የሚቻለው።');
+            await setAdminStep(userId, 'awaiting_post_anon', { text: text });
+            return ctx.reply('👤 ስምዎ ይታይ ወይስ በድብቅ?', Markup.inlineKeyboard([
+                [Markup.button.callback('✅ ስሜ ይታይ', 'post_show_name')],
+                [Markup.button.callback('🕵️ በድብቅ', 'post_hide_name')]
+            ]));
+        }
+        if (userState && userState.step === 'awaiting_reply_text') {
+            if (text === '/cancel') { await clearAdminStep(userId); return ctx.reply('❌ ተሰርዟል።'); }
+            if (!text) return ctx.reply('ፅሁፍ ብቻ።');
+            
+            const postId = userState.tempData.postId;
+            const replyName = (ctx.from.first_name || 'User');
+            await Post.findByIdAndUpdate(postId, { $push: { replies: { userName: replyName, text: text } } });
+            await clearAdminStep(userId);
+            await ctx.reply('✅ መልስዎ ተጨምሯል!');
+            return;
+        }
+
+        // === MENU INTERACTIONS ===
         if (text === '🔐 Admin Panel' && ADMIN_IDS.includes(userId)) return showAdminMenu(ctx);
 
         const urgeLabel = await getConfig('urge_btn_label', '🆘 እርዳኝ');
@@ -209,11 +261,15 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
             const count = await Motivation.countDocuments();
             if (count === 0) return ctx.reply('Empty.');
             const m = await Motivation.findOne().skip(Math.floor(Math.random() * count));
-            return ctx.reply(`💪 **በርታ!**\n\n${m.text}`, { parse_mode: 'Markdown' });
+            // 10-Minute Rule Message
+            return ctx.reply(`⏳ **የ10 ደቂቃ ህግ!**\n\nውሳኔ ከመወሰንህ በፊት እባክህ ለ10 ደቂቃ ብቻ ታገስ። ስሜቱ ማዕበል ነው፣ ይመጣል ይሄዳል።\n\n💡 **ምክር:**\n${m.text}`, { parse_mode: 'Markdown' });
         }
 
         const streakLabel = await getConfig('streak_btn_label', '📅 ቀኔን ቁጠር');
         if (text === streakLabel) return handleStreak(ctx);
+
+        const communityLabel = await getConfig('comm_btn_label', '💬 የጥንካሬ መድረክ');
+        if (text === communityLabel) return handleCommunity(ctx);
 
         const channelLabel = await getConfig('channel_btn_label', '📢 ቻናሎች');
         if (text === channelLabel) {
@@ -242,125 +298,131 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
 // 6. LOGIC FUNCTIONS
 // ============================================================
 
-async function handleStreak(ctx) {
-    try {
-        const userId = String(ctx.from.id);
-        let user = await User.findOne({ userId });
-        if (!user) user = await User.create({ userId, firstName: ctx.from.first_name });
-        const diff = Math.floor(Math.abs(new Date() - user.streakStart) / 86400000);
-        
-        // Use MarkdownV2 compatible formatting manually for consistency with EditMessage
-        const name = escapeMarkdown(user.firstName || 'User');
-        const msg = `🔥 *${name}*\nStreak: *${diff} Days*\nBest: ${user.bestStreak}`;
-        
-        await ctx.reply(msg, {
-            parse_mode: 'MarkdownV2',
-            ...Markup.inlineKeyboard([
-                [Markup.button.callback('💔 ወደቅኩ (Relapse)', `rel_${userId}`)],
-                [Markup.button.callback('🏆 ደረጃ (Leaderboard)', `led_${userId}`)],
-                [Markup.button.callback('🔄 Refresh', `ref_${userId}`)]
-            ])
-        });
-    } catch (e) { console.error("Streak Error:", e); }
+// --- COMMUNITY ---
+async function handleCommunity(ctx) {
+    await ctx.reply(
+        '💬 **የጥንካሬ መድረክ**\n\nሀሳብ ያጋሩ፣ ለሌሎች መልስ ይስጡ።\n(ሁሉም ፅሁፍ በአድሚን ከፀደቀ በኋላ ይለቀቃል)',
+        Markup.inlineKeyboard([
+            [Markup.button.callback('📖 አንብብ', 'read_posts')],
+            [Markup.button.callback('✍️ ፃፍ', 'write_post')]
+        ])
+    );
+}
+bot.action('write_post', async ctx => {
+    await setAdminStep(String(ctx.from.id), 'awaiting_post_text');
+    await ctx.reply('✍️ መልእክትዎን ይፃፉ:\n(ለመሰረዝ /cancel ይበሉ)');
+    await ctx.answerCbQuery();
+});
+bot.action('post_show_name', async ctx => postFinalize(ctx, false));
+bot.action('post_hide_name', async ctx => postFinalize(ctx, true));
+
+async function postFinalize(ctx, isAnon) {
+    const userId = String(ctx.from.id);
+    const state = await getAdminState(userId);
+    if (!state || !state.tempData.text) return ctx.reply('Error.');
+    const name = isAnon ? '🕵️ Anonymous' : (ctx.from.first_name || 'User');
+    await Post.create({ userId, userName: name, text: state.tempData.text, status: 'pending' });
+    await clearAdminStep(userId);
+    await ctx.editMessageText('✅ ተልኳል! አድሚን ካጸደቀው በኋላ ይለቀቃል።');
 }
 
-const verify = (ctx, id) => String(ctx.from.id) === id;
-
-bot.action(/^rel_(.+)$/, async ctx => { 
-    try {
-        if(!verify(ctx, ctx.match[1])) return ctx.answerCbQuery('⚠️ Not allowed');
-        await ctx.editMessageText('አይዞህ! ለምን ወደቅክ? (ምክንያቱን ምረጥ)', Markup.inlineKeyboard([
-            [Markup.button.callback('🥱 መሰላቸት', `rsn_bored_${ctx.match[1]}`)], 
-            [Markup.button.callback('😰 ጭንቀት', `rsn_stress_${ctx.match[1]}`)], 
-            [Markup.button.callback('🔥 ስሜት', `rsn_urg_${ctx.match[1]}`)], 
-            [Markup.button.callback('❌ ሰረዝ (Cancel)', `can_${ctx.match[1]}`)]
-        ]));
-    } catch (e) { console.error(e); ctx.answerCbQuery('Error'); }
+bot.action('read_posts', async ctx => {
+    const posts = await Post.find({ status: 'approved' }).sort({ createdAt: -1 }).limit(10);
+    if (posts.length === 0) { await ctx.reply('ምንም ፅሁፍ የለም።'); return ctx.answerCbQuery(); }
+    let btns = [];
+    posts.forEach(p => {
+        const preview = p.text.substring(0, 20) + '...';
+        btns.push([Markup.button.callback(`📝 ${preview}`, `view_post_${p._id}`)]);
+    });
+    await ctx.reply('የቅርብ ፅሁፎች:', Markup.inlineKeyboard(btns));
+    await ctx.answerCbQuery();
 });
 
-bot.action(/^rsn_(.+)_(.+)$/, async ctx => { 
+bot.action(/^view_post_(.+)$/, async ctx => {
     try {
-        if(!verify(ctx, ctx.match[2])) return ctx.answerCbQuery('⚠️ Not allowed');
-        const u = await User.findOne({ userId: ctx.match[2] }); 
-        const d = Math.floor(Math.abs(new Date() - u.streakStart)/86400000); 
-        if(d > u.bestStreak) u.bestStreak = d; 
-        u.streakStart = new Date(); 
-        u.relapseHistory.push({reason:ctx.match[1]}); 
-        await u.save(); 
-        // Try deleting the menu message, ignore if fails
-        try{await ctx.deleteMessage();}catch(e){} 
-        await ctx.reply('✅ መዝግቤያለሁ። ቀናትህ ወደ 0 ተመልሰዋል። ጠንክር! 💪'); 
-        ctx.answerCbQuery();
-    } catch (e) { console.error(e); ctx.answerCbQuery('Error'); }
+        const post = await Post.findById(ctx.match[1]);
+        if (!post) return ctx.answerCbQuery('Deleted.');
+        let msg = `👤 **${escapeMarkdown(post.userName)}**\n\n${escapeMarkdown(post.text)}\n\n`;
+        if (post.replies && post.replies.length > 0) {
+            msg += `--- 🗣 Replies ---\n`;
+            post.replies.forEach(r => msg += `🔸 *${escapeMarkdown(r.userName)}*: ${escapeMarkdown(r.text)}\n`);
+        }
+        await ctx.reply(msg, { parse_mode: 'MarkdownV2', ...Markup.inlineKeyboard([[Markup.button.callback('↩️ መልስ ስጥ', `reply_to_${post._id}`)]]) });
+        await ctx.answerCbQuery();
+    } catch(e) {}
 });
 
-bot.action(/^ref_(.+)$/, async ctx => { 
-    try {
-        if(!verify(ctx, ctx.match[1])) return ctx.answerCbQuery('⚠️ Not allowed');
-        try{await ctx.deleteMessage();}catch(e){} 
-        await handleStreak(ctx); 
-        ctx.answerCbQuery();
-    } catch (e) { console.error(e); }
+bot.action(/^reply_to_(.+)$/, async ctx => {
+    await setAdminStep(String(ctx.from.id), 'awaiting_reply_text', { postId: ctx.match[1] });
+    await ctx.reply('✍️ መልስዎን ይፃፉ:\n(ለመሰረዝ /cancel ይበሉ)');
+    await ctx.answerCbQuery();
 });
 
-bot.action(/^can_(.+)$/, async ctx => { 
-    try {
-        if(!verify(ctx, ctx.match[1])) return ctx.answerCbQuery('⚠️ Not allowed');
-        try{await ctx.deleteMessage();}catch(e){} 
-        ctx.answerCbQuery();
-    } catch (e) { console.error(e); }
-});
+// --- STREAK & GROWTH ---
+async function handleStreak(ctx) {
+    const userId = String(ctx.from.id);
+    let user = await User.findOne({ userId });
+    if (!user) user = await User.create({ userId, firstName: ctx.from.first_name });
+    const diff = Math.floor(Math.abs(new Date() - user.streakStart) / 86400000);
+    const stage = getGrowthStage(diff); 
+    const name = escapeMarkdown(user.firstName || 'User');
+    const msg = `🔥 *${name}*\n\n📆 Streak: *${diff} Days*\n🌱 Level: *${stage}*\n🏆 Best: ${user.bestStreak}`;
+    await ctx.reply(msg, { parse_mode: 'MarkdownV2', ...Markup.inlineKeyboard([ [Markup.button.callback('💔 ወደቅኩ', `rel_${userId}`)], [Markup.button.callback('🏆 ደረጃ', `led_${userId}`)], [Markup.button.callback('🔄 Refresh', `ref_${userId}`)] ]) });
+}
 
-// Fixed Leaderboard
+// --- ACTIVE LEADERBOARD ---
 bot.action(/^led_(.+)$/, async ctx => {
     try {
-        const topUsers = await User.find().sort({ streakStart: 1 }).limit(10);
-        let msg = '🏆 *Top 10 Leaders* 🏆\n\n';
-        
+        const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+        const topUsers = await User.find({ lastActive: { $gte: sevenDaysAgo } }).sort({ streakStart: 1 }).limit(10);
+        let msg = '🏆 *Top 10 Active Warriors* 🏆\n_(Last 7 Days)_\n\n';
+        if (topUsers.length === 0) msg += "No active users.";
         topUsers.forEach((u, i) => {
             const d = Math.floor(Math.abs(new Date() - u.streakStart) / 86400000);
-            // Escape name properly for MarkdownV2 to prevent crash
-            const name = escapeMarkdown(u.firstName || 'User');
-            // Use proper V2 bold syntax (*) and escape dot (.)
-            msg += `${i+1}\\. ${name} — *${d} days*\n`;
+            msg += `${i+1}\\. ${escapeMarkdown(u.firstName || 'User').substring(0, 15)} — *${d} days*\n`;
         });
-        
-        await ctx.editMessageText(msg, { 
-            parse_mode: 'MarkdownV2', 
-            ...Markup.inlineKeyboard([[Markup.button.callback('🔙 Back', `ref_${ctx.match[1]}`)]])
-        });
-    } catch (e) { 
-        console.error("Leaderboard Error:", e);
-        ctx.answerCbQuery("Error loading leaderboard");
-    }
+        await ctx.editMessageText(msg, { parse_mode: 'MarkdownV2', ...Markup.inlineKeyboard([[Markup.button.callback('🔙 Back', `ref_${ctx.match[1]}`)]]) });
+    } catch (e) { ctx.answerCbQuery("Error"); }
 });
 
+const verify = (ctx, id) => String(ctx.from.id) === id;
+bot.action(/^rel_(.+)$/, async ctx => { if(!verify(ctx, ctx.match[1])) return ctx.answerCbQuery('Not allowed'); await ctx.editMessageText('አይዞህ! ለምን ወደቅክ?', Markup.inlineKeyboard([[Markup.button.callback('🥱 መሰላቸት', `rsn_bored_${ctx.match[1]}`)], [Markup.button.callback('😰 ጭንቀት', `rsn_stress_${ctx.match[1]}`)], [Markup.button.callback('🔥 ስሜት', `rsn_urg_${ctx.match[1]}`)], [Markup.button.callback('❌ ሰረዝ', `can_${ctx.match[1]}`)]])); });
+bot.action(/^rsn_(.+)_(.+)$/, async ctx => { if(!verify(ctx, ctx.match[2])) return ctx.answerCbQuery('Not allowed'); const u = await User.findOne({ userId: ctx.match[2] }); const d = Math.floor(Math.abs(new Date() - u.streakStart)/86400000); if(d>u.bestStreak)u.bestStreak=d; u.streakStart=new Date(); u.relapseHistory.push({reason:ctx.match[1]}); await u.save(); try{await ctx.deleteMessage();}catch(e){} await ctx.reply('✅ Reset. Stay Strong!'); ctx.answerCbQuery(); });
+bot.action(/^ref_(.+)$/, async ctx => { if(!verify(ctx, ctx.match[1])) return ctx.answerCbQuery('Not allowed'); try{await ctx.deleteMessage();}catch(e){} await handleStreak(ctx); ctx.answerCbQuery(); });
+bot.action(/^can_(.+)$/, async ctx => { if(!verify(ctx, ctx.match[1])) return ctx.answerCbQuery('Not allowed'); try{await ctx.deleteMessage();}catch(e){} ctx.answerCbQuery(); });
+
+// --- ADMIN PANEL ---
 async function showAdminMenu(ctx) {
     const c = await User.countDocuments();
+    const p = await Post.countDocuments({ status: 'pending' });
     await ctx.reply(`⚙️ Admin (Users: ${c})`, Markup.inlineKeyboard([
-        [Markup.button.callback('💪 Motivation', 'man_mot'), Markup.button.callback('🔲 Layout', 'adm_lay')],
-        [Markup.button.callback('📝 Start Msg', 'adm_wel'), Markup.button.callback('🏷️ Rename', 'adm_ren')],
+        [Markup.button.callback('💪 Motivation', 'man_mot'), Markup.button.callback(`⏳ Pending Posts (${p})`, 'adm_approve')],
+        [Markup.button.callback('🔨 Ban User', 'adm_ban'), Markup.button.callback('📝 Start Msg', 'adm_wel')],
+        [Markup.button.callback('🔲 Layout', 'adm_lay'), Markup.button.callback('🏷️ Rename', 'adm_ren')],
         [Markup.button.callback('📢 Channels', 'adm_chan'), Markup.button.callback('🔘 Custom Btn', 'adm_cus')]
     ]));
 }
 
-const ask = (ctx, s, t) => { setAdminStep(String(ctx.from.id), s); ctx.reply(t); ctx.answerCbQuery(); };
+// Admin Logic (Ban, Approve, Manage)
+bot.action('adm_ban', async ctx => { await setAdminStep(String(ctx.from.id), 'awaiting_ban_id'); await ctx.reply('ለማገድ (Ban) የሰውን User ID ላክ:'); await ctx.answerCbQuery(); });
 
-// Motivation Manager
-bot.action('man_mot', async ctx => {
-    try {
-        const mots = await Motivation.find().sort({ addedAt: -1 }).limit(5); 
-        let btns = [[Markup.button.callback('➕ Add New', 'add_mot')]];
-        mots.forEach(m => {
-            const preview = m.text.length > 20 ? m.text.substring(0, 20) + '...' : m.text;
-            btns.push([Markup.button.callback(`🗑️ ${preview}`, `del_mot_${m._id}`)]);
-        });
-        await ctx.editMessageText('Manage Motivations (Last 5):', Markup.inlineKeyboard(btns));
-    } catch (e) { console.error(e); }
+bot.action('adm_approve', async ctx => {
+    const pendings = await Post.find({ status: 'pending' }).limit(1);
+    if (pendings.length === 0) { await ctx.reply('No pending posts.'); return ctx.answerCbQuery(); }
+    const p = pendings[0];
+    await ctx.reply(`📝 **Request from ${p.userName}**\nUser ID: ${p.userId}\n\n${p.text}`, Markup.inlineKeyboard([[Markup.button.callback('✅ Approve', `app_yes_${p._id}`), Markup.button.callback('❌ Reject', `app_no_${p._id}`)]]));
+    await ctx.answerCbQuery();
 });
-bot.action('add_mot', c => ask(c, 'awaiting_motivation', 'Send Text:'));
-bot.action(/^del_mot_(.+)$/, async c => { await Motivation.findByIdAndDelete(c.match[1]); c.reply('Deleted'); c.answerCbQuery(); });
+bot.action(/^app_yes_(.+)$/, async ctx => { await Post.findByIdAndUpdate(ctx.match[1], { status: 'approved' }); await ctx.deleteMessage(); await ctx.reply('Approved!'); });
+bot.action(/^app_no_(.+)$/, async ctx => { await Post.findByIdAndDelete(ctx.match[1]); await ctx.deleteMessage(); await ctx.reply('Deleted.'); });
 
+// ... Standard Admin Handlers (Motivation, Layout, etc.) ...
+const ask = (ctx, s, t) => { setAdminStep(String(ctx.from.id), s); ctx.reply(t); ctx.answerCbQuery(); };
+bot.action('man_posts', async ctx => { const posts = await Post.find().sort({ createdAt: -1 }).limit(5); let btns = []; posts.forEach(p => { const preview = p.text.substring(0, 15) + '...'; btns.push([Markup.button.callback(`🗑️ ${preview} (${p.userName})`, `del_post_${p._id}`)]); }); await ctx.editMessageText('Recent Posts:', Markup.inlineKeyboard(btns)); });
+bot.action(/^del_post_(.+)$/, async c => { await Post.findByIdAndDelete(c.match[1]); c.reply('Deleted'); c.answerCbQuery(); });
+bot.action('man_mot', async ctx => { const mots = await Motivation.find().sort({ addedAt: -1 }).limit(5); let btns = [[Markup.button.callback('➕ Add New', 'add_mot')]]; mots.forEach(m => { const preview = m.text.substring(0, 20) + '...'; btns.push([Markup.button.callback(`🗑️ ${preview}`, `del_mot_${m._id}`)]); }); await ctx.editMessageText('Manage Motivations:', Markup.inlineKeyboard(btns)); });
+bot.action('add_mot', c => ask(c, 'awaiting_motivation', 'Text:'));
+bot.action(/^del_mot_(.+)$/, async c => { await Motivation.findByIdAndDelete(c.match[1]); c.reply('Deleted'); c.answerCbQuery(); });
 bot.action('adm_lay', c => ask(c, 'awaiting_layout', 'Layout:'));
 bot.action('adm_wel', c => ask(c, 'awaiting_welcome', 'Msg:'));
 bot.action('adm_ren', c => { c.reply('Which?', Markup.inlineKeyboard([[Markup.button.callback('Urge', 'ren_urg'), Markup.button.callback('Streak', 'ren_str')]])); c.answerCbQuery(); });
