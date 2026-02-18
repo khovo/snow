@@ -71,7 +71,7 @@ const motivationSchema = new mongoose.Schema({
 });
 const Motivation = mongoose.models.Motivation || mongoose.model('Motivation', motivationSchema);
 
-// G. Confessions (Auto-Delete after 7 days)
+// G. Confessions
 const postSchema = new mongoose.Schema({
     confessionId: Number,
     userId: String,
@@ -85,7 +85,7 @@ const postSchema = new mongoose.Schema({
 postSchema.index({ createdAt: 1 }, { expireAfterSeconds: 604800 }); 
 const Post = mongoose.models.Post || mongoose.model('Post', postSchema);
 
-// H. Comments (Auto-Delete after 7 days)
+// H. Comments
 const commentSchema = new mongoose.Schema({
     postId: mongoose.Schema.Types.ObjectId,
     userId: String,
@@ -139,17 +139,12 @@ function getGrowthStage(days) {
     return '👑 ንጉስ (Legend)';
 }
 
-// --- CLEAN UI HELPER ---
 async function sendCleanMessage(ctx, text, extra, userId) {
     const user = await User.findOne({ userId });
-    // Try delete old message
     if (user && user.lastMenuId) {
-        try { await ctx.deleteMessage(user.lastMenuId); } 
-        catch (e) { /* Ignore if old */ }
+        try { await ctx.deleteMessage(user.lastMenuId); } catch (e) {}
     }
-    // Send new
     const sent = await ctx.reply(text, extra);
-    // Save new ID
     await User.findOneAndUpdate({ userId }, { lastMenuId: sent.message_id });
     return sent;
 }
@@ -161,24 +156,21 @@ const bot = new Telegraf(BOT_TOKEN);
 
 bot.start(async (ctx) => {
   try {
+    if (ctx.chat.type !== 'private') return; // Silent in groups
+
     const userId = String(ctx.from.id);
     const firstName = ctx.from.first_name || 'Friend';
     const user = await User.findOne({ userId });
     if (user && user.isBanned) return; 
 
-    // Update User
     await User.findOneAndUpdate({ userId }, { firstName, lastActive: new Date() }, { upsert: true });
-    
-    // Clear Admin state on start
     if (ADMIN_IDS.includes(userId)) await clearAdminStep(userId);
 
-    // Configs
     const urgeLabel = await getConfig('urge_btn_label', '🆘 እርዳኝ');
     const communityLabel = await getConfig('comm_btn_label', '🗣 Confessions');
     const streakLabel = await getConfig('streak_btn_label', '📅 ቀኔን ቁጠር');
     const channelLabel = await getConfig('channel_btn_label', '📢 ቻናሎች');
 
-    // Layout
     const defaultLayout = [[urgeLabel, streakLabel], [communityLabel, channelLabel]];
     let layoutRaw = await getConfig('keyboard_layout', defaultLayout);
     let layout = (typeof layoutRaw === 'string') ? JSON.parse(layoutRaw) : layoutRaw;
@@ -199,21 +191,18 @@ bot.start(async (ctx) => {
     });
     if (tempRow.length > 0) layout.push(tempRow);
 
-    // Add Admin Panel ONLY if private chat and user is admin
-    if (ADMIN_IDS.includes(userId) && ctx.chat.type === 'private') {
+    if (ADMIN_IDS.includes(userId)) {
         if (!layout.flat().includes('🔐 Admin Panel')) layout.push(['🔐 Admin Panel']);
     }
 
     const welcomeMsg = await getConfig('welcome_msg', `ሰላም ${firstName}! እንኳን በሰላም መጣህ።`);
-    
-    // Send Clean Menu
     await sendCleanMessage(ctx, welcomeMsg, Markup.keyboard(layout).resize(), userId);
 
   } catch (e) { console.error(e); }
 });
 
 bot.command('profile', async (ctx) => {
-    if (ctx.chat.type !== 'private') return ctx.reply('Profile is available in private chat only.');
+    if (ctx.chat.type !== 'private') return;
     showProfile(ctx, String(ctx.from.id));
 });
 
@@ -223,16 +212,129 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
         const userId = String(ctx.from.id);
         const text = ctx.message.text; 
         
+        if (ctx.chat.type !== 'private') return;
+
         const currentUser = await User.findOne({ userId });
         if (currentUser && currentUser.isBanned) return;
         await User.findOneAndUpdate({ userId }, { lastActive: new Date() });
 
-        // === ADMIN WIZARD (Private Only) ===
-        if (ADMIN_IDS.includes(userId) && ctx.chat.type === 'private') {
+        // === ADMIN WIZARD ===
+        if (ADMIN_IDS.includes(userId)) {
             const state = await getAdminState(userId);
             if (state && state.step) {
                 if (text === '/cancel') { await clearAdminStep(userId); return ctx.reply('❌ Canceled.'); }
-                // Admin Actions ...
+                
+                // --- NEW: BROADCAST WIZARD ---
+                if (state.step === 'awaiting_broadcast_content') {
+                    // 1. Capture Content
+                    let msgType = 'text';
+                    let content = text;
+                    let caption = ctx.message.caption || '';
+                    
+                    // Handle media
+                    if (ctx.message.photo) { msgType = 'photo'; content = ctx.message.photo[ctx.message.photo.length-1].file_id; }
+                    else if (ctx.message.video) { msgType = 'video'; content = ctx.message.video.file_id; }
+                    else if (ctx.message.voice) { msgType = 'voice'; content = ctx.message.voice.file_id; }
+                    else if (!text) return ctx.reply('Unsupported format.');
+
+                    // Save to temp
+                    await setAdminStep(userId, 'awaiting_broadcast_links', { 
+                        msgType, content, caption,
+                        sourceMsgId: ctx.message.message_id // Keep original for copy if needed
+                    });
+                    
+                    return ctx.reply(
+                        '🔗 **Link (Buttons) መጨመር ይፈልጋሉ?**\n\n' +
+                        'ካልፈለጉ "No" ይበሉ።\n\n' +
+                        'Format:\nName - Link\nName 2 - Link 2'
+                    );
+                }
+
+                if (state.step === 'awaiting_broadcast_links') {
+                    let markup = null;
+                    
+                    // 2. Parse Links
+                    if (text && text.toLowerCase() !== 'no') {
+                        let rows = [];
+                        const lines = text.split('\n');
+                        for (let line of lines) {
+                            const parts = line.split('-');
+                            if (parts.length >= 2) {
+                                const label = parts[0].trim();
+                                const url = parts.slice(1).join('-').trim();
+                                if (url.startsWith('http')) rows.push([Markup.button.url(label, url)]);
+                            }
+                        }
+                        if (rows.length > 0) markup = { inline_keyboard: rows };
+                    }
+
+                    // Save Markup to temp
+                    const currentData = state.tempData;
+                    currentData.markup = markup;
+                    await setAdminStep(userId, 'awaiting_broadcast_confirm', currentData);
+
+                    // 3. Send Preview
+                    await ctx.reply('👁 **Preview (እንዲህ ሆኖ ይላካል):**');
+                    
+                    // Use copyMessage to simulate exactly how users will see it
+                    // We send it back to admin
+                    try {
+                        if (currentData.msgType === 'text') {
+                            await ctx.reply(currentData.content, markup ? { reply_markup: markup } : {});
+                        } else {
+                            // Using specific methods for media to ensure caption/markup work
+                            let extra = markup ? { reply_markup: markup } : {};
+                            if (currentData.caption) extra.caption = currentData.caption;
+                            
+                            if (currentData.msgType === 'photo') await ctx.replyWithPhoto(currentData.content, extra);
+                            else if (currentData.msgType === 'video') await ctx.replyWithVideo(currentData.content, extra);
+                            else if (currentData.msgType === 'voice') await ctx.replyWithVoice(currentData.content, extra);
+                        }
+                    } catch (e) {
+                        return ctx.reply('❌ Preview Error. Invalid format? /cancel to stop.');
+                    }
+
+                    return ctx.reply('✅ ይላክ? /confirm ብለው ያረጋግጡ።');
+                }
+
+                if (state.step === 'awaiting_broadcast_confirm') {
+                    if (text === '/confirm') {
+                        // 4. EXECUTE BROADCAST
+                        const data = state.tempData;
+                        const users = await User.find({});
+                        let success = 0, fail = 0;
+                        
+                        await ctx.reply(`🚀 Broadcasting to ${users.length} users...`);
+                        
+                        // Background process (don't await loop to prevent timeout)
+                        (async () => {
+                            for (const u of users) {
+                                try {
+                                    let extra = data.markup ? { reply_markup: data.markup } : {};
+                                    if (data.caption) extra.caption = data.caption;
+
+                                    if (data.msgType === 'text') await bot.telegram.sendMessage(u.userId, data.content, extra);
+                                    else if (data.msgType === 'photo') await bot.telegram.sendPhoto(u.userId, data.content, extra);
+                                    else if (data.msgType === 'video') await bot.telegram.sendVideo(u.userId, data.content, extra);
+                                    else if (data.msgType === 'voice') await bot.telegram.sendVoice(u.userId, data.content, extra);
+                                    
+                                    success++;
+                                } catch (e) { fail++; }
+                                // Small delay to respect rate limits
+                                await new Promise(r => setTimeout(r, 30)); 
+                            }
+                            // Notify Admin when done
+                            try { await bot.telegram.sendMessage(userId, `📢 **Broadcast Report**\n\n✅ Sent: ${success}\n❌ Failed: ${fail}`); } catch(e){}
+                        })();
+
+                        await clearAdminStep(userId);
+                        return;
+                    } else {
+                        return ctx.reply('Type /confirm to send or /cancel to stop.');
+                    }
+                }
+
+                // ... Other Admin Logic ...
                 if (state.step === 'awaiting_ban_id') { await User.findOneAndUpdate({ userId: text.trim() }, { isBanned: true }); await ctx.reply(`🚫 Banned.`); await clearAdminStep(userId); return; }
                 if (state.step === 'awaiting_welcome') { await Config.findOneAndUpdate({ key: 'welcome_msg' }, { value: text }, { upsert: true }); await ctx.reply('✅ Saved!'); await clearAdminStep(userId); return; }
                 if (state.step === 'awaiting_channel_name') { await setAdminStep(userId, 'awaiting_channel_link', { name: text }); return ctx.reply('🔗 Link:'); }
@@ -266,52 +368,44 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
             }
         }
 
-        // === USER STATE (Private Only) ===
-        if (ctx.chat.type === 'private') {
-            const userState = await getAdminState(userId);
-            if (userState && userState.step === 'edit_nickname') { await User.findOneAndUpdate({ userId }, { nickname: text }); await clearAdminStep(userId); await ctx.reply('✅ Nickname updated!'); return showProfile(ctx, userId); }
-            if (userState && userState.step === 'edit_bio') { await User.findOneAndUpdate({ userId }, { bio: text }); await clearAdminStep(userId); await ctx.reply('✅ Bio updated!'); return showProfile(ctx, userId); }
-            if (userState && userState.step === 'edit_emoji') { await User.findOneAndUpdate({ userId }, { emoji: text }); await clearAdminStep(userId); await ctx.reply('✅ Emoji updated!'); return showProfile(ctx, userId); }
-            
-            if (userState && userState.step === 'awaiting_confession') {
-                if (text === '/cancel') { await clearAdminStep(userId); return ctx.reply('❌ Canceled.'); }
-                if (!text) return ctx.reply('Text only please.');
-                await Post.create({ userId, authorName: currentUser.nickname || "Anonymous", text: text, status: 'pending' });
-                await clearAdminStep(userId);
-                await ctx.reply('📜 **Received!** Sent to admins.', { parse_mode: 'Markdown' });
-                return;
-            }
-            
-            if (userState && userState.step === 'awaiting_comment') {
-                if (text === '/cancel') { await clearAdminStep(userId); return ctx.reply('❌ Canceled.'); }
-                const postId = userState.tempData.postId;
-                await Comment.create({ postId, userId, authorName: currentUser.nickname || "Anonymous", text: text });
-                await User.findOneAndUpdate({ userId }, { $inc: { aura: 2 } }); 
-                await clearAdminStep(userId);
-                await ctx.reply('✅ Comment added!');
-                return;
-            }
+        // === USER STATE ===
+        const userState = await getAdminState(userId);
+        if (userState && userState.step === 'edit_nickname') { await User.findOneAndUpdate({ userId }, { nickname: text }); await clearAdminStep(userId); await ctx.reply('✅ Nickname updated!'); return showProfile(ctx, userId); }
+        if (userState && userState.step === 'edit_bio') { await User.findOneAndUpdate({ userId }, { bio: text }); await clearAdminStep(userId); await ctx.reply('✅ Bio updated!'); return showProfile(ctx, userId); }
+        if (userState && userState.step === 'edit_emoji') { await User.findOneAndUpdate({ userId }, { emoji: text }); await clearAdminStep(userId); await ctx.reply('✅ Emoji updated!'); return showProfile(ctx, userId); }
+        
+        if (userState && userState.step === 'awaiting_confession') {
+            if (text === '/cancel') { await clearAdminStep(userId); return ctx.reply('❌ Canceled.'); }
+            if (!text) return ctx.reply('Text only please.');
+            await Post.create({ userId, authorName: currentUser.nickname || "Anonymous", text: text, status: 'pending' });
+            await clearAdminStep(userId);
+            await ctx.reply('📜 **Received!** Sent to admins.', { parse_mode: 'Markdown' });
+            return;
+        }
+        
+        if (userState && userState.step === 'awaiting_comment') {
+            if (text === '/cancel') { await clearAdminStep(userId); return ctx.reply('❌ Canceled.'); }
+            const postId = userState.tempData.postId;
+            await Comment.create({ postId, userId, authorName: currentUser.nickname || "Anonymous", text: text });
+            await User.findOneAndUpdate({ userId }, { $inc: { aura: 2 } }); 
+            await clearAdminStep(userId);
+            await ctx.reply('✅ Comment added!');
+            return;
+        }
 
-            if (userState && userState.step === 'awaiting_reply_comment') {
-                if (text === '/cancel') { await clearAdminStep(userId); return ctx.reply('❌ Canceled.'); }
-                const commentId = userState.tempData.commentId;
-                const replyName = currentUser.nickname || "Anonymous";
-                await Comment.findByIdAndUpdate(commentId, { $push: { replies: { authorName: replyName, text: text } } });
-                await clearAdminStep(userId);
-                await ctx.reply('✅ Reply sent!');
-                return;
-            }
+        if (userState && userState.step === 'awaiting_reply_comment') {
+            if (text === '/cancel') { await clearAdminStep(userId); return ctx.reply('❌ Canceled.'); }
+            const commentId = userState.tempData.commentId;
+            const replyName = currentUser.nickname || "Anonymous";
+            await Comment.findByIdAndUpdate(commentId, { $push: { replies: { authorName: replyName, text: text } } });
+            await clearAdminStep(userId);
+            await ctx.reply('✅ Reply sent!');
+            return;
         }
 
         // === MENU INTERACTIONS ===
-        
-        // Admin Panel (Private Only)
-        if (text === '🔐 Admin Panel' && ADMIN_IDS.includes(userId)) {
-            if (ctx.chat.type === 'private') return showAdminMenu(ctx);
-            else return ctx.reply('Admin panel works in private chat only.');
-        }
+        if (text === '🔐 Admin Panel' && ADMIN_IDS.includes(userId)) return showAdminMenu(ctx);
 
-        // Configurable Buttons (Work Everywhere)
         const urgeLabel = await getConfig('urge_btn_label', '🆘 እርዳኝ');
         if (text === urgeLabel) {
             const count = await Motivation.countDocuments();
@@ -325,9 +419,8 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
 
         const communityLabel = await getConfig('comm_btn_label', '🗣 Confessions');
         if (text === communityLabel) {
-            // *** RESTRICT CONFESSIONS IN GROUP ***
             if (ctx.chat.type !== 'private') {
-                return ctx.reply('⚠️ ለምስጢራዊነት ሲባል ይህ አገልግሎት በግል (Private Chat) ብቻ ነው የሚሰራው።\n\n👉 ቦቱን ለማናገር እዚህ ይጫኑ።', Markup.inlineKeyboard([[Markup.button.url('Go to Private Chat', `https://t.me/${ctx.botInfo.username}`)]]));
+                return ctx.reply('⚠️ ለምስጢራዊነት ሲባል ይህ አገልግሎት በግል (Private Chat) ብቻ ነው የሚሰራው።', Markup.inlineKeyboard([[Markup.button.url('Go to Private Chat', `https://t.me/${ctx.botInfo.username}`)]]));
             }
             return handleConfessions(ctx);
         }
@@ -348,7 +441,6 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
                 extra.reply_markup = { inline_keyboard: linkBtns };
             }
             
-            // Clean up old menu for Text responses, Media sends new msg
             const user = await User.findOne({ userId });
             if (user && user.lastMenuId) try { await ctx.deleteMessage(user.lastMenuId); } catch(e){}
 
@@ -364,23 +456,19 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
     } catch (e) { console.error(e); }
 });
 
-// ============================================================
-// 6. LOGIC FUNCTIONS
-// ============================================================
+// ... (Other functions: showProfile, handleConfessions, etc. remain the same) ...
+// Included here for completeness so you can copy-paste fully
 
-// --- PROFILE ---
 async function showProfile(ctx, userId) {
     const user = await User.findOne({ userId });
     if (!user) return ctx.reply("User not found.");
     const msg = `👤 *Profile*\n\n🏷️ *Name:* ${escapeMarkdown(user.nickname)}\n🎭 *Emoji:* ${user.emoji}\n⚡️ *Aura:* ${user.aura}\n📝 *Bio:* ${escapeMarkdown(user.bio)}`;
-    
     await sendCleanMessage(ctx, msg, { parse_mode: 'MarkdownV2', ...Markup.inlineKeyboard([[Markup.button.callback('✏️ Edit Name', 'prof_name'), Markup.button.callback('✏️ Edit Bio', 'prof_bio')], [Markup.button.callback('😊 Edit Emoji', 'prof_emoji')], [Markup.button.callback('🔙 Back', 'back_to_menu')]]) }, userId);
 }
 bot.action('prof_name', async ctx => { await setAdminStep(String(ctx.from.id), 'edit_nickname'); ctx.reply('Enter nickname:'); ctx.answerCbQuery(); });
 bot.action('prof_bio', async ctx => { await setAdminStep(String(ctx.from.id), 'edit_bio'); ctx.reply('Enter bio:'); ctx.answerCbQuery(); });
 bot.action('prof_emoji', async ctx => { await setAdminStep(String(ctx.from.id), 'edit_emoji'); ctx.reply('Send emoji:'); ctx.answerCbQuery(); });
 
-// --- CONFESSIONS ---
 async function handleConfessions(ctx) {
     const userId = String(ctx.from.id);
     await sendCleanMessage(
@@ -403,7 +491,6 @@ bot.action('back_to_menu', async ctx => {
     try { await ctx.deleteMessage(); } catch (e) {}
     const userId = String(ctx.from.id);
     const welcomeMsg = await getConfig('welcome_msg', `Welcome back!`);
-    
     const urgeLabel = await getConfig('urge_btn_label', '🆘 እርዳኝ');
     const communityLabel = await getConfig('comm_btn_label', '🗣 Confessions');
     const streakLabel = await getConfig('streak_btn_label', '📅 ቀኔን ቁጠር');
@@ -618,8 +705,6 @@ bot.action(/^creply_(.+)$/, async ctx => {
     await ctx.answerCbQuery();
 });
 
-
-// --- STREAK ---
 async function handleStreak(ctx) {
     try {
         const userId = String(ctx.from.id);
@@ -663,13 +748,15 @@ async function showAdminMenu(ctx) {
     const p = await Post.countDocuments({ status: 'pending' });
     await sendCleanMessage(ctx, `⚙️ Admin (Users: ${c})`, Markup.inlineKeyboard([
         [Markup.button.callback(`⏳ Approvals (${p})`, 'adm_approve')],
-        [Markup.button.callback('🔨 Ban', 'adm_ban'), Markup.button.callback('📢 Channel', 'adm_chan')],
-        [Markup.button.callback('🔘 Custom', 'adm_cus')],
+        [Markup.button.callback('📢 Broadcast', 'adm_cast'), Markup.button.callback('🔨 Ban', 'adm_ban')],
+        [Markup.button.callback('📢 Channel', 'adm_chan'), Markup.button.callback('🔘 Custom', 'adm_cus')],
         [Markup.button.callback('🔙 Back', `back_to_menu`)]
     ]), String(ctx.from.id));
 }
 
 bot.action('adm_ban', async ctx => { await setAdminStep(String(ctx.from.id), 'awaiting_ban_id'); await ctx.reply('Send User ID:'); await ctx.answerCbQuery(); });
+
+bot.action('adm_cast', async ctx => { await setAdminStep(String(ctx.from.id), 'awaiting_broadcast_content'); await ctx.reply('📢 Send message (Text/Image/Video) to broadcast:'); await ctx.answerCbQuery(); });
 
 bot.action('adm_approve', async ctx => {
     const pendings = await Post.find({ status: 'pending' }).limit(1);
