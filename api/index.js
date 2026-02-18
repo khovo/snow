@@ -15,21 +15,19 @@ if (!MONGODB_URI) throw new Error('MONGODB_URI is missing!');
 // 2. DATABASE SCHEMAS
 // ============================================================
 
-// A. Anti-Duplicate
 const processedUpdateSchema = new mongoose.Schema({
   update_id: { type: Number, required: true, unique: true },
   createdAt: { type: Date, default: Date.now, expires: 3600 }
 });
 const ProcessedUpdate = mongoose.models.ProcessedUpdate || mongoose.model('ProcessedUpdate', processedUpdateSchema);
 
-// B. Configs
 const configSchema = new mongoose.Schema({
   key: { type: String, required: true, unique: true },
   value: { type: mongoose.Schema.Types.Mixed, required: true }
 });
 const Config = mongoose.models.Config || mongoose.model('Config', configSchema);
 
-// C. User Data
+// Updated User Schema with lastMenuId for cleaning
 const userSchema = new mongoose.Schema({
   userId: { type: String, required: true, unique: true },
   firstName: String,
@@ -37,6 +35,7 @@ const userSchema = new mongoose.Schema({
   bestStreak: { type: Number, default: 0 },
   relapseHistory: [{ date: { type: Date, default: Date.now }, reason: String }],
   lastActive: { type: Date, default: Date.now },
+  lastMenuId: { type: Number }, // To delete old menu on /start
   nickname: { type: String, default: "Anonymous" },
   bio: { type: String, default: "" },
   emoji: { type: String, default: "👤" },
@@ -46,14 +45,12 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.models.User || mongoose.model('User', userSchema);
 
-// D. Channels
 const channelSchema = new mongoose.Schema({
   name: { type: String, required: true },
   link: { type: String, required: true }
 });
 const Channel = mongoose.models.Channel || mongoose.model('Channel', channelSchema);
 
-// E. Custom Buttons
 const customButtonSchema = new mongoose.Schema({
   label: { type: String, required: true, unique: true },
   type: { type: String, enum: ['text', 'photo', 'video', 'voice'], default: 'text' },
@@ -63,14 +60,13 @@ const customButtonSchema = new mongoose.Schema({
 });
 const CustomButton = mongoose.models.CustomButton || mongoose.model('CustomButton', customButtonSchema);
 
-// F. Motivation
 const motivationSchema = new mongoose.Schema({
   text: { type: String, required: true },
   addedAt: { type: Date, default: Date.now }
 });
 const Motivation = mongoose.models.Motivation || mongoose.model('Motivation', motivationSchema);
 
-// G. Confessions / Posts (AUTO-DELETE AFTER 7 DAYS)
+// Auto-Delete Confessions after 7 Days
 const postSchema = new mongoose.Schema({
     confessionId: Number,
     userId: String,
@@ -79,13 +75,12 @@ const postSchema = new mongoose.Schema({
     status: { type: String, enum: ['pending', 'approved'], default: 'pending' },
     upvotes: [String],
     downvotes: [String],
-    createdAt: { type: Date, default: Date.now } // TTL Index applied below
+    createdAt: { type: Date, default: Date.now }
 });
-// Create Index for Auto-Delete (7 days = 604800 seconds)
 postSchema.index({ createdAt: 1 }, { expireAfterSeconds: 604800 }); 
 const Post = mongoose.models.Post || mongoose.model('Post', postSchema);
 
-// H. Comments (Updated for Likes/Replies)
+// Auto-Delete Comments after 7 Days
 const commentSchema = new mongoose.Schema({
     postId: mongoose.Schema.Types.ObjectId,
     userId: String,
@@ -93,10 +88,9 @@ const commentSchema = new mongoose.Schema({
     text: String,
     upvotes: [String],
     downvotes: [String],
-    replies: [{ authorName: String, text: String }], // Simple nested replies
+    replies: [{ authorName: String, text: String }],
     createdAt: { type: Date, default: Date.now }
 });
-// Auto-delete comments if post is gone (also 7 days safety)
 commentSchema.index({ createdAt: 1 }, { expireAfterSeconds: 604800 });
 const Comment = mongoose.models.Comment || mongoose.model('Comment', commentSchema);
 
@@ -120,7 +114,6 @@ async function getAdminState(userId) { const user = await User.findOne({ userId 
 async function clearAdminStep(userId) { await User.findOneAndUpdate({ userId }, { adminState: { step: null, tempData: {} } }); }
 async function getConfig(key, def) { const doc = await Config.findOne({ key }); return doc ? doc.value : def; }
 
-// FIXED: Robust MarkdownV2 Escaping (Includes #)
 function escapeMarkdown(text) {
     if (!text) return '';
     return String(text).replace(/[_*[\]()~`>#+\-=|{}.!]/g, '\\$&');
@@ -150,11 +143,15 @@ bot.start(async (ctx) => {
   try {
     const userId = String(ctx.from.id);
     const firstName = ctx.from.first_name || 'Friend';
+    
+    // Check Ban
     const user = await User.findOne({ userId });
     if (user && user.isBanned) return; 
 
-    await User.findOneAndUpdate({ userId }, { firstName, lastActive: new Date() }, { upsert: true });
-    if (ADMIN_IDS.includes(userId)) await clearAdminStep(userId);
+    // CLEAN UP OLD MENU
+    if (user && user.lastMenuId) {
+        try { await ctx.deleteMessage(user.lastMenuId); } catch (e) { /* Ignore if too old */ }
+    }
 
     const urgeLabel = await getConfig('urge_btn_label', '🆘 እርዳኝ');
     const communityLabel = await getConfig('comm_btn_label', '🗣 Confessions');
@@ -187,7 +184,13 @@ bot.start(async (ctx) => {
     }
 
     const welcomeMsg = await getConfig('welcome_msg', `ሰላም ${firstName}! እንኳን በሰላም መጣህ።`);
-    await ctx.reply(welcomeMsg, Markup.keyboard(layout).resize());
+    
+    // Send and Save Message ID for future cleanup
+    const sentMsg = await ctx.reply(welcomeMsg, Markup.keyboard(layout).resize());
+    await User.findOneAndUpdate({ userId }, { firstName, lastActive: new Date(), lastMenuId: sentMsg.message_id }, { upsert: true });
+    
+    if (ADMIN_IDS.includes(userId)) await clearAdminStep(userId);
+
   } catch (e) { console.error(e); }
 });
 
@@ -343,10 +346,45 @@ async function handleConfessions(ctx) {
         Markup.inlineKeyboard([
             [Markup.button.callback('📜 Browse Confessions', 'browse_confessions_0')],
             [Markup.button.callback('➕ Post Confession', 'write_confession')],
-            [Markup.button.callback('👤 My Profile', 'my_profile')]
+            [Markup.button.callback('👤 My Profile', 'my_profile')],
+            [Markup.button.callback('🔙 Back to Menu', 'back_to_menu')] // Added Back
         ])
     );
 }
+bot.action('back_to_menu', async ctx => {
+    // Delete current message and simulate /start
+    await ctx.deleteMessage();
+    // Re-trigger start logic (simplified: just send welcome)
+    // NOTE: Cannot re-trigger actual /start event easily, but we can send the menu.
+    const userId = String(ctx.from.id);
+    const welcomeMsg = await getConfig('welcome_msg', `Welcome back!`);
+    
+    // We need the layout again
+    const urgeLabel = await getConfig('urge_btn_label', '🆘 እርዳኝ');
+    const communityLabel = await getConfig('comm_btn_label', '🗣 Confessions');
+    const streakLabel = await getConfig('streak_btn_label', '📅 ቀኔን ቁጠር');
+    const channelLabel = await getConfig('channel_btn_label', '📢 ቻናሎች');
+    const defaultLayout = [[urgeLabel, streakLabel], [communityLabel, channelLabel]];
+    let layoutRaw = await getConfig('keyboard_layout', defaultLayout);
+    let layout = (typeof layoutRaw === 'string') ? JSON.parse(layoutRaw) : layoutRaw;
+    // Fix missing button
+    const currentLabels = new Set(layout.flat().map(l => l.trim()));
+    if (!currentLabels.has(communityLabel)) {
+        if (layout.length >= 2) layout[1].unshift(communityLabel); else layout.push([communityLabel]);
+    }
+    const customBtns = await CustomButton.find({});
+    const updatedLabels = new Set(layout.flat().map(l => l.trim())); 
+    let tempRow = [];
+    customBtns.forEach(btn => {
+        if (!updatedLabels.has(btn.label.trim())) { tempRow.push(btn.label); if (tempRow.length === 2) { layout.push(tempRow); tempRow = []; } }
+    });
+    if (tempRow.length > 0) layout.push(tempRow);
+    if (ADMIN_IDS.includes(userId) && !layout.flat().includes('🔐 Admin Panel')) layout.push(['🔐 Admin Panel']);
+
+    const sent = await ctx.reply(welcomeMsg, Markup.keyboard(layout).resize());
+    await User.findOneAndUpdate({ userId }, { lastMenuId: sent.message_id });
+});
+
 bot.action('my_profile', ctx => showProfile(ctx, String(ctx.from.id)));
 bot.action('write_confession', async ctx => {
     await setAdminStep(String(ctx.from.id), 'awaiting_confession');
@@ -354,6 +392,7 @@ bot.action('write_confession', async ctx => {
     await ctx.answerCbQuery();
 });
 
+// Fixed Browse Regex and Logic
 bot.action(/^browse_confessions_(\d+)$/, async ctx => {
     const page = parseInt(ctx.match[1]);
     const limit = 10;
@@ -375,12 +414,14 @@ bot.action(/^browse_confessions_(\d+)$/, async ctx => {
     if (skip + limit < totalPosts) navRow.push(Markup.button.callback('Next ➡️', `browse_confessions_${page + 1}`));
     if (navRow.length > 0) btns.push(navRow);
     
+    // Back Button
+    btns.push([Markup.button.callback('🔙 Back', 'back_to_menu')]);
+    
     const title = page === 0 ? '👇 Select a Confession:' : `👇 Page ${page + 1}:`;
     try { await ctx.editMessageText(title, Markup.inlineKeyboard(btns)); } catch (e) { await ctx.reply(title, Markup.inlineKeyboard(btns)); }
     await ctx.answerCbQuery();
 });
 
-// FIXED VIEW_CONF HANDLER
 bot.action(/^view_conf_(.+)$/, async ctx => {
     try {
         const post = await Post.findById(ctx.match[1]);
@@ -405,7 +446,8 @@ bot.action(/^view_conf_(.+)$/, async ctx => {
                     Markup.button.callback(`👎 ${downCount}`, `vote_down_${post._id}`),
                     Markup.button.callback(`💬 Reply`, `add_comment_${post._id}`)
                 ],
-                [Markup.button.callback(`📂 Browse Comments (${commentCount})`, `view_comments_${post._id}_0`)] // Added page 0
+                [Markup.button.callback(`📂 Browse Comments (${commentCount})`, `view_comments_${post._id}_0`)],
+                [Markup.button.callback('🔙 Back', `browse_confessions_0`)]
             ])
         });
         await ctx.answerCbQuery();
@@ -436,7 +478,8 @@ bot.action(/^vote_(up|down)_(.+)$/, async ctx => {
                     Markup.button.callback(`👎 ${down.length}`, `vote_down_${postId}`),
                     Markup.button.callback(`💬 Reply`, `add_comment_${postId}`)
                 ],
-                [Markup.button.callback(`📂 Browse Comments (${commentCount})`, `view_comments_${postId}_0`)]
+                [Markup.button.callback(`📂 Browse Comments (${commentCount})`, `view_comments_${postId}_0`)],
+                [Markup.button.callback('🔙 Back', `browse_confessions_0`)]
             ]
         });
     } catch(e) {}
@@ -449,11 +492,11 @@ bot.action(/^add_comment_(.+)$/, async ctx => {
     await ctx.answerCbQuery();
 });
 
-// --- UPDATED COMMENT SYSTEM (PAGINATED + INTERACTIONS) ---
-bot.action(/^view_comments_(.+)_(.+)$/, async ctx => {
+// --- UPDATED COMMENT SYSTEM WITH REGEX FIX ---
+bot.action(/^view_comments_([a-f\d]+)_(\d+)$/, async ctx => {
     const postId = ctx.match[1];
     const page = parseInt(ctx.match[2]);
-    const limit = 1; // Show 1 comment per page to allow interaction buttons
+    const limit = 1; // 1 comment per page
     const skip = page * limit;
 
     const comments = await Comment.find({ postId: postId }).sort({ createdAt: 1 }).skip(skip).limit(limit);
@@ -476,7 +519,6 @@ bot.action(/^view_comments_(.+)_(.+)$/, async ctx => {
         c.replies.forEach(r => msg += `▫️ _${escapeMarkdown(r.authorName)}:_ ${escapeMarkdown(r.text)}\n`);
     }
 
-    // Buttons: Vote Comment, Reply Comment, Navigation
     let buttons = [
         [
             Markup.button.callback(`👍 ${upCount}`, `cvote_up_${c._id}_${postId}_${page}`),
@@ -489,20 +531,20 @@ bot.action(/^view_comments_(.+)_(.+)$/, async ctx => {
     if (page > 0) navRow.push(Markup.button.callback('⬅️ Prev', `view_comments_${postId}_${page - 1}`));
     if (skip + limit < totalComments) navRow.push(Markup.button.callback('Next ➡️', `view_comments_${postId}_${page + 1}`));
     if (navRow.length > 0) buttons.push(navRow);
+    
+    buttons.push([Markup.button.callback('🔙 Back to Post', `view_conf_${postId}`)]);
 
-    // Try Edit or Send New
     try { await ctx.editMessageText(msg, { parse_mode: 'MarkdownV2', ...Markup.inlineKeyboard(buttons) }); } 
     catch(e) { await ctx.reply(msg, { parse_mode: 'MarkdownV2', ...Markup.inlineKeyboard(buttons) }); }
     
     await ctx.answerCbQuery();
 });
 
-// Vote Comment
-bot.action(/^cvote_(up|down)_(.+)_(.+)_(.+)$/, async ctx => {
+bot.action(/^cvote_(up|down)_([a-f\d]+)_([a-f\d]+)_(\d+)$/, async ctx => {
     const type = ctx.match[1];
     const commentId = ctx.match[2];
-    const postId = ctx.match[3];
-    const page = ctx.match[4];
+    const postId = ctx.match[3]; // Not used here but kept for routing
+    const page = ctx.match[4]; // Not used here but kept for routing
     const userId = String(ctx.from.id);
 
     const comment = await Comment.findById(commentId);
@@ -516,18 +558,9 @@ bot.action(/^cvote_(up|down)_(.+)_(.+)_(.+)$/, async ctx => {
     if (type === 'up') up.push(userId); else down.push(userId);
 
     await Comment.findByIdAndUpdate(commentId, { upvotes: up, downvotes: down });
-    
-    // Refresh view (Re-call view_comments)
-    // We can't call action handler directly easily, so we trick it by editing markup
-    // But easier to just update the count in UI if we want instant feedback, 
-    // or just re-render. Let's just answer CB. Ideally we should re-render.
-    // Let's trigger re-render of current page.
-    // ... Actually simplified: just answer. User can refresh by nav back/forth. 
-    // To be perfect, we replicate view_comments logic here or just leave it.
     ctx.answerCbQuery('Voted!');
 });
 
-// Reply to Comment
 bot.action(/^creply_(.+)$/, async ctx => {
     await setAdminStep(String(ctx.from.id), 'awaiting_reply_comment', { commentId: ctx.match[1] });
     await ctx.reply('✍️ Write your reply:', { reply_markup: { force_reply: true } });
@@ -546,7 +579,7 @@ async function handleStreak(ctx) {
         const name = escapeMarkdown(user.nickname === "Anonymous" ? user.firstName : user.nickname);
         const escapedStage = escapeMarkdown(stage);
         const msg = `🔥 *${name}*\n\n📆 Streak: *${diff} Days*\n🌱 Level: *${escapedStage}*\n🏆 Best: ${user.bestStreak}`;
-        await ctx.reply(msg, { parse_mode: 'MarkdownV2', ...Markup.inlineKeyboard([[Markup.button.callback('💔 Relapse', `rel_${userId}`)], [Markup.button.callback('🏆 Leaderboard', `led_${userId}`)], [Markup.button.callback('🔄 Refresh', `ref_${userId}`)]]) });
+        await ctx.reply(msg, { parse_mode: 'MarkdownV2', ...Markup.inlineKeyboard([[Markup.button.callback('💔 Relapse', `rel_${userId}`)], [Markup.button.callback('🏆 Leaderboard', `led_${userId}`)], [Markup.button.callback('🔄 Refresh', `ref_${userId}`)], [Markup.button.callback('🔙 Back', `back_to_menu`)]]) });
     } catch(e) { console.error("Streak Error:", e); }
 }
 
@@ -579,7 +612,8 @@ async function showAdminMenu(ctx) {
     await ctx.reply(`⚙️ Admin (Users: ${c})`, Markup.inlineKeyboard([
         [Markup.button.callback(`⏳ Approvals (${p})`, 'adm_approve')],
         [Markup.button.callback('🔨 Ban', 'adm_ban'), Markup.button.callback('📢 Channel', 'adm_chan')],
-        [Markup.button.callback('🔘 Custom', 'adm_cus')]
+        [Markup.button.callback('🔘 Custom', 'adm_cus')],
+        [Markup.button.callback('🔙 Back', `back_to_menu`)]
     ]));
 }
 
