@@ -253,12 +253,14 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
             const count = await Motivation.countDocuments();
             if (count === 0) return ctx.reply('Empty.');
             const m = await Motivation.findOne().skip(Math.floor(Math.random() * count));
+            // 10-Minute Rule Message is here!
             return ctx.reply(`⏳ **የ10 ደቂቃ ህግ!**\n\nውሳኔ ከመወሰንህ በፊት እባክህ ለ10 ደቂቃ ብቻ ታገስ። ስሜቱ ማዕበል ነው፣ ይመጣል ይሄዳል።\n\n💡 **ምክር:**\n${m.text}`, { parse_mode: 'Markdown' });
         }
 
         const streakLabel = await getConfig('streak_btn_label', '📅 ቀኔን ቁጠር');
         if (text === streakLabel) return handleStreak(ctx);
 
+        // *** THIS IS THE MISSING PART THAT WAS CAUSING THE ISSUE ***
         const communityLabel = await getConfig('comm_btn_label', '💬 የጥንካሬ መድረክ');
         if (text === communityLabel) return handleCommunity(ctx);
 
@@ -349,7 +351,7 @@ bot.action(/^reply_to_(.+)$/, async ctx => {
     await ctx.answerCbQuery();
 });
 
-// --- STREAK & GROWTH (FIXED) ---
+// --- STREAK & GROWTH (FIXED & ROBUST) ---
 async function handleStreak(ctx) {
     try {
         const userId = String(ctx.from.id);
@@ -359,7 +361,7 @@ async function handleStreak(ctx) {
         const diff = Math.floor(Math.abs(new Date() - user.streakStart) / 86400000);
         const stage = getGrowthStage(diff); 
         
-        // **FIX**: Escape user name and stage to prevent MarkdownV2 crash
+        // Escape Markdown characters to prevent crashing
         const name = escapeMarkdown(user.firstName || 'User');
         const escapedStage = escapeMarkdown(stage);
         
@@ -422,8 +424,6 @@ bot.action(/^app_yes_(.+)$/, async ctx => { await Post.findByIdAndUpdate(ctx.mat
 bot.action(/^app_no_(.+)$/, async ctx => { await Post.findByIdAndDelete(ctx.match[1]); await ctx.deleteMessage(); await ctx.reply('Deleted.'); });
 
 const ask = (ctx, s, t) => { setAdminStep(String(ctx.from.id), s); ctx.reply(t); ctx.answerCbQuery(); };
-bot.action('man_posts', async ctx => { const posts = await Post.find().sort({ createdAt: -1 }).limit(5); let btns = []; posts.forEach(p => { const preview = p.text.substring(0, 15) + '...'; btns.push([Markup.button.callback(`🗑️ ${preview} (${p.userName})`, `del_post_${p._id}`)]); }); await ctx.editMessageText('Recent Posts:', Markup.inlineKeyboard(btns)); });
-bot.action(/^del_post_(.+)$/, async c => { await Post.findByIdAndDelete(c.match[1]); c.reply('Deleted'); c.answerCbQuery(); });
 bot.action('adm_wel', c => ask(c, 'awaiting_welcome', 'Msg:'));
 bot.action('adm_chan', async c => { const ch = await Channel.find({}); c.editMessageText('Channels:', Markup.inlineKeyboard([[Markup.button.callback('➕ Add', 'add_ch')], ...ch.map(x=>[Markup.button.callback(`🗑️ ${x.name}`, `del_ch_${x._id}`)])])); });
 bot.action('add_ch', c => ask(c, 'awaiting_channel_name', 'Name:'));
