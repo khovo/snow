@@ -15,46 +15,40 @@ if (!MONGODB_URI) throw new Error('MONGODB_URI is missing!');
 // 2. DATABASE SCHEMAS
 // ============================================================
 
-// A. Anti-Duplicate
 const processedUpdateSchema = new mongoose.Schema({
   update_id: { type: Number, required: true, unique: true },
   createdAt: { type: Date, default: Date.now, expires: 3600 }
 });
 const ProcessedUpdate = mongoose.models.ProcessedUpdate || mongoose.model('ProcessedUpdate', processedUpdateSchema);
 
-// B. Configs (Global Counters etc)
 const configSchema = new mongoose.Schema({
   key: { type: String, required: true, unique: true },
   value: { type: mongoose.Schema.Types.Mixed, required: true }
 });
 const Config = mongoose.models.Config || mongoose.model('Config', configSchema);
 
-// C. User Data (Enhanced Profile)
 const userSchema = new mongoose.Schema({
   userId: { type: String, required: true, unique: true },
-  firstName: String, // Telegram Name
-  // Profile System
-  nickname: { type: String, default: "Anonymous" },
-  bio: { type: String, default: "No bio set." },
-  emoji: { type: String, default: "👤" },
-  aura: { type: Number, default: 0 }, // Score/Reputation
-  // Streak System
+  firstName: String,
   streakStart: { type: Date, default: Date.now },
   bestStreak: { type: Number, default: 0 },
+  relapseHistory: [{ date: { type: Date, default: Date.now }, reason: String }],
   lastActive: { type: Date, default: Date.now },
+  nickname: { type: String, default: "Anonymous" },
+  bio: { type: String, default: "" },
+  emoji: { type: String, default: "👤" },
+  aura: { type: Number, default: 0 },
   isBanned: { type: Boolean, default: false },
   adminState: { step: { type: String, default: null }, tempData: { type: mongoose.Schema.Types.Mixed, default: {} } }
 });
 const User = mongoose.models.User || mongoose.model('User', userSchema);
 
-// D. Channels
 const channelSchema = new mongoose.Schema({
   name: { type: String, required: true },
   link: { type: String, required: true }
 });
 const Channel = mongoose.models.Channel || mongoose.model('Channel', channelSchema);
 
-// E. Custom Buttons
 const customButtonSchema = new mongoose.Schema({
   label: { type: String, required: true, unique: true },
   type: { type: String, enum: ['text', 'photo', 'video', 'voice'], default: 'text' },
@@ -64,27 +58,24 @@ const customButtonSchema = new mongoose.Schema({
 });
 const CustomButton = mongoose.models.CustomButton || mongoose.model('CustomButton', customButtonSchema);
 
-// F. Motivation
 const motivationSchema = new mongoose.Schema({
   text: { type: String, required: true },
   addedAt: { type: Date, default: Date.now }
 });
 const Motivation = mongoose.models.Motivation || mongoose.model('Motivation', motivationSchema);
 
-// G. Confessions / Posts
 const postSchema = new mongoose.Schema({
-    confessionId: { type: Number, unique: true }, // #1024
+    confessionId: Number,
     userId: String,
-    authorName: String, // Nickname at time of posting
+    authorName: String,
     text: String,
     status: { type: String, enum: ['pending', 'approved'], default: 'pending' },
-    upvotes: [String], // Array of UserIDs
+    upvotes: [String],
     downvotes: [String],
     createdAt: { type: Date, default: Date.now }
 });
 const Post = mongoose.models.Post || mongoose.model('Post', postSchema);
 
-// H. Comments
 const commentSchema = new mongoose.Schema({
     postId: mongoose.Schema.Types.ObjectId,
     userId: String,
@@ -113,11 +104,16 @@ async function setAdminStep(userId, step, data = {}) { await User.findOneAndUpda
 async function getAdminState(userId) { const user = await User.findOne({ userId }); return user ? user.adminState : { step: null, tempData: {} }; }
 async function clearAdminStep(userId) { await User.findOneAndUpdate({ userId }, { adminState: { step: null, tempData: {} } }); }
 async function getConfig(key, def) { const doc = await Config.findOne({ key }); return doc ? doc.value : def; }
-function escapeMarkdown(text) { if (!text) return ''; return text.replace(/[_*[\]()~`>#+\-=|{}.!]/g, '\\$&'); }
+
+// Fixed Escape Function (Now includes #)
+function escapeMarkdown(text) {
+    if (!text) return '';
+    return String(text).replace(/[_*[\]()~`>#+\-=|{}.!]/g, '\\$&');
+}
 
 async function getNextConfessionId() {
     const last = await Post.findOne().sort({ confessionId: -1 });
-    return last && last.confessionId ? last.confessionId + 1 : 1000;
+    return (last && last.confessionId) ? last.confessionId + 1 : 1000;
 }
 
 function getGrowthStage(days) {
@@ -175,17 +171,13 @@ bot.start(async (ctx) => {
         if (!layout.flat().includes('🔐 Admin Panel')) layout.push(['🔐 Admin Panel']);
     }
 
-    const welcomeMsg = await getConfig('welcome_msg', `ሰላም ${firstName}! ወደ NoFap Support Bot እንኳን በሰላም መጣህ።`);
+    const welcomeMsg = await getConfig('welcome_msg', `ሰላም ${firstName}! እንኳን በሰላም መጣህ።`);
     await ctx.reply(welcomeMsg, Markup.keyboard(layout).resize());
   } catch (e) { console.error(e); }
 });
 
-// --- PROFILE COMMAND ---
-bot.command('profile', async (ctx) => {
-    await showProfile(ctx, String(ctx.from.id));
-});
+bot.command('profile', async (ctx) => showProfile(ctx, String(ctx.from.id)));
 
-// --- MAIN HANDLER ---
 bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
     if (!ctx.message) return;
     try {
@@ -196,29 +188,23 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
         if (currentUser && currentUser.isBanned) return;
         await User.findOneAndUpdate({ userId }, { lastActive: new Date() });
 
-        // === ADMIN WIZARD ===
         if (ADMIN_IDS.includes(userId)) {
             const state = await getAdminState(userId);
             if (state && state.step) {
                 if (text === '/cancel') { await clearAdminStep(userId); return ctx.reply('❌ Canceled.'); }
-                // ... (Existing Admin Logic for Layout, Motivation, etc - Kept Compact)
-                if (state.step === 'awaiting_ban_id') {
-                    await User.findOneAndUpdate({ userId: text.trim() }, { isBanned: true });
-                    await ctx.reply(`🚫 Banned.`); await clearAdminStep(userId); return;
-                }
+                
+                if (state.step === 'awaiting_ban_id') { await User.findOneAndUpdate({ userId: text.trim() }, { isBanned: true }); await ctx.reply(`🚫 Banned.`); await clearAdminStep(userId); return; }
                 if (state.step === 'awaiting_welcome') { await Config.findOneAndUpdate({ key: 'welcome_msg' }, { value: text }, { upsert: true }); await ctx.reply('✅ Saved!'); await clearAdminStep(userId); return; }
                 if (state.step === 'awaiting_channel_name') { await setAdminStep(userId, 'awaiting_channel_link', { name: text }); return ctx.reply('🔗 Link:'); }
                 if (state.step === 'awaiting_channel_link') { await Channel.create({ name: state.tempData.name, link: text }); await ctx.reply('✅ Added!'); await clearAdminStep(userId); return; }
                 if (state.step === 'awaiting_motivation') { await Motivation.create({ text }); await ctx.reply('✅ Added!'); await clearAdminStep(userId); return; }
                 if (state.step === 'awaiting_btn_name') { await setAdminStep(userId, 'awaiting_btn_content', { label: text }); return ctx.reply('📥 Content:'); }
                 if (state.step === 'awaiting_btn_content') {
-                    // Custom button creation logic (same as before)
                     let type = 'text', content = '', caption = ctx.message.caption || '';
                     if (ctx.message.voice) { type = 'voice'; content = ctx.message.voice.file_id; }
                     else if (ctx.message.photo) { type = 'photo'; content = ctx.message.photo[ctx.message.photo.length - 1].file_id; }
                     else if (ctx.message.video) { type = 'video'; content = ctx.message.video.file_id; }
-                    else if (text) { content = text; }
-                    else return ctx.reply('Invalid.');
+                    else if (text) { content = text; } else return ctx.reply('Invalid.');
                     await setAdminStep(userId, 'awaiting_btn_links', { label: state.tempData.label, type, content, caption });
                     return ctx.reply('🔗 Links? (Send "No" to skip)');
                 }
@@ -240,67 +226,29 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
             }
         }
 
-        // === USER STATE (Profile & Confession) ===
         const userState = await getAdminState(userId);
+        if (userState && userState.step === 'edit_nickname') { await User.findOneAndUpdate({ userId }, { nickname: text }); await clearAdminStep(userId); await ctx.reply('✅ Nickname updated!'); return showProfile(ctx, userId); }
+        if (userState && userState.step === 'edit_bio') { await User.findOneAndUpdate({ userId }, { bio: text }); await clearAdminStep(userId); await ctx.reply('✅ Bio updated!'); return showProfile(ctx, userId); }
+        if (userState && userState.step === 'edit_emoji') { await User.findOneAndUpdate({ userId }, { emoji: text }); await clearAdminStep(userId); await ctx.reply('✅ Emoji updated!'); return showProfile(ctx, userId); }
         
-        // 1. Profile Editing
-        if (userState && userState.step === 'edit_nickname') {
-            await User.findOneAndUpdate({ userId }, { nickname: text });
-            await clearAdminStep(userId);
-            await ctx.reply('✅ Nickname updated!');
-            return showProfile(ctx, userId);
-        }
-        if (userState && userState.step === 'edit_bio') {
-            await User.findOneAndUpdate({ userId }, { bio: text });
-            await clearAdminStep(userId);
-            await ctx.reply('✅ Bio updated!');
-            return showProfile(ctx, userId);
-        }
-        if (userState && userState.step === 'edit_emoji') {
-            await User.findOneAndUpdate({ userId }, { emoji: text });
-            await clearAdminStep(userId);
-            await ctx.reply('✅ Emoji updated!');
-            return showProfile(ctx, userId);
-        }
-
-        // 2. Confession / Post
         if (userState && userState.step === 'awaiting_confession') {
             if (text === '/cancel') { await clearAdminStep(userId); return ctx.reply('❌ Canceled.'); }
             if (!text) return ctx.reply('Text only please.');
-            
-            // Save as pending
-            await Post.create({
-                userId,
-                authorName: currentUser.nickname || "Anonymous",
-                text: text,
-                status: 'pending'
-            });
+            await Post.create({ userId, authorName: currentUser.nickname || "Anonymous", text: text, status: 'pending' });
             await clearAdminStep(userId);
-            await ctx.reply('📜 **Confession Received!**\n\nSent to admins for approval.', { parse_mode: 'Markdown' });
+            await ctx.reply('📜 **Received!** Sent to admins.', { parse_mode: 'Markdown' });
+            return;
+        }
+        if (userState && userState.step === 'awaiting_comment') {
+            if (text === '/cancel') { await clearAdminStep(userId); return ctx.reply('❌ Canceled.'); }
+            const postId = userState.tempData.postId;
+            await Comment.create({ postId, userId, authorName: currentUser.nickname || "Anonymous", text: text });
+            await User.findOneAndUpdate({ userId }, { $inc: { aura: 2 } }); 
+            await clearAdminStep(userId);
+            await ctx.reply('✅ Comment added!');
             return;
         }
 
-        // 3. Commenting
-        if (userState && userState.step === 'awaiting_comment') {
-            if (text === '/cancel') { await clearAdminStep(userId); return ctx.reply('❌ Canceled.'); }
-            
-            const postId = userState.tempData.postId;
-            await Comment.create({
-                postId: postId,
-                userId: userId,
-                authorName: currentUser.nickname || "Anonymous",
-                text: text
-            });
-            
-            // Award Aura
-            await User.findOneAndUpdate({ userId }, { $inc: { aura: 2 } }); // 2 Aura for commenting
-
-            await clearAdminStep(userId);
-            await ctx.reply('✅ Comment added! (+2 Aura)');
-            return; // Don't show menu
-        }
-
-        // === MENU INTERACTIONS ===
         if (text === '🔐 Admin Panel' && ADMIN_IDS.includes(userId)) return showAdminMenu(ctx);
 
         const urgeLabel = await getConfig('urge_btn_label', '🆘 እርዳኝ');
@@ -308,7 +256,6 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
             const count = await Motivation.countDocuments();
             if (count === 0) return ctx.reply('Empty.');
             const m = await Motivation.findOne().skip(Math.floor(Math.random() * count));
-            // Removed 10-Min rule text, simplified help
             return ctx.reply(`🛡️ **Stay Strong!**\n\n${m.text}`, { parse_mode: 'Markdown' });
         }
 
@@ -325,7 +272,6 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
             return ctx.reply('Channels:', Markup.inlineKeyboard(btns));
         }
 
-        // Custom Buttons
         const customBtn = await CustomButton.findOne({ label: text });
         if (customBtn) {
             let extra = { parse_mode: 'Markdown' };
@@ -342,102 +288,78 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
     } catch (e) { console.error(e); }
 });
 
-// ============================================================
-// 6. LOGIC FUNCTIONS
-// ============================================================
-
-// --- PROFILE SYSTEM ---
 async function showProfile(ctx, userId) {
     const user = await User.findOne({ userId });
     if (!user) return ctx.reply("User not found.");
-
-    const msg = `👤 **Profile**\n\n` +
-                `🏷️ **Name:** ${escapeMarkdown(user.nickname)}\n` +
-                `🎭 **Emoji:** ${user.emoji}\n` +
-                `⚡️ **Aura:** ${user.aura}\n` +
-                `📝 **Bio:** ${escapeMarkdown(user.bio)}`;
-
-    await ctx.reply(msg, {
-        parse_mode: 'MarkdownV2',
-        ...Markup.inlineKeyboard([
-            [Markup.button.callback('✏️ Edit Name', 'prof_name'), Markup.button.callback('✏️ Edit Bio', 'prof_bio')],
-            [Markup.button.callback('😊 Edit Emoji', 'prof_emoji')]
-        ])
-    });
+    const msg = `👤 *Profile*\n\n🏷️ *Name:* ${escapeMarkdown(user.nickname)}\n🎭 *Emoji:* ${user.emoji}\n⚡️ *Aura:* ${user.aura}\n📝 *Bio:* ${escapeMarkdown(user.bio)}`;
+    await ctx.reply(msg, { parse_mode: 'MarkdownV2', ...Markup.inlineKeyboard([[Markup.button.callback('✏️ Edit Name', 'prof_name'), Markup.button.callback('✏️ Edit Bio', 'prof_bio')], [Markup.button.callback('😊 Edit Emoji', 'prof_emoji')]]) });
 }
+bot.action('prof_name', async ctx => { await setAdminStep(String(ctx.from.id), 'edit_nickname'); ctx.reply('Enter nickname:'); ctx.answerCbQuery(); });
+bot.action('prof_bio', async ctx => { await setAdminStep(String(ctx.from.id), 'edit_bio'); ctx.reply('Enter bio:'); ctx.answerCbQuery(); });
+bot.action('prof_emoji', async ctx => { await setAdminStep(String(ctx.from.id), 'edit_emoji'); ctx.reply('Send emoji:'); ctx.answerCbQuery(); });
 
-bot.action('prof_name', async ctx => {
-    await setAdminStep(String(ctx.from.id), 'edit_nickname');
-    ctx.reply('Enter new nickname:'); ctx.answerCbQuery();
-});
-bot.action('prof_bio', async ctx => {
-    await setAdminStep(String(ctx.from.id), 'edit_bio');
-    ctx.reply('Enter new bio:'); ctx.answerCbQuery();
-});
-bot.action('prof_emoji', async ctx => {
-    await setAdminStep(String(ctx.from.id), 'edit_emoji');
-    ctx.reply('Send a single emoji:'); ctx.answerCbQuery();
-});
-
-// --- CONFESSION / COMMUNITY SYSTEM ---
 async function handleConfessions(ctx) {
     await ctx.reply(
-        '🗣 **Confessions & Support**\n\nExpress yourself anonymously or read others.',
+        '🗣 **Confessions & Support**',
         Markup.inlineKeyboard([
-            [Markup.button.callback('📜 Browse Confessions', 'browse_confessions')],
+            [Markup.button.callback('📜 Browse Confessions', 'browse_confessions_0')],
             [Markup.button.callback('➕ Post Confession', 'write_confession')],
             [Markup.button.callback('👤 My Profile', 'my_profile')]
         ])
     );
 }
-
 bot.action('my_profile', ctx => showProfile(ctx, String(ctx.from.id)));
-
 bot.action('write_confession', async ctx => {
     await setAdminStep(String(ctx.from.id), 'awaiting_confession');
-    await ctx.reply('✍️ Write your confession/thought:\n(It will be anonymous/nickname based on your profile)\n\nType /cancel to stop.');
+    await ctx.reply('✍️ Write your confession (Text only):');
     await ctx.answerCbQuery();
 });
 
-// Browse Logic
-bot.action('browse_confessions', async ctx => {
-    // Show approved posts, newest first
-    const posts = await Post.find({ status: 'approved' }).sort({ createdAt: -1 }).limit(10);
+bot.action(/^browse_confessions_(\d+)$/, async ctx => {
+    const page = parseInt(ctx.match[1]);
+    const limit = 10;
+    const skip = page * limit;
+    const posts = await Post.find({ status: 'approved' }).sort({ createdAt: -1 }).skip(skip).limit(limit);
+    const totalPosts = await Post.countDocuments({ status: 'approved' });
     
-    if (posts.length === 0) {
-        await ctx.reply('No confessions yet.');
-        return ctx.answerCbQuery();
-    }
+    if (posts.length === 0 && page === 0) { await ctx.reply('No confessions yet.'); return ctx.answerCbQuery(); }
 
-    // Instead of list, let's show the latest one, or a list of IDs?
-    // User requested "Confession Bot" style where you scroll or see list.
-    // Let's list titles (first few words)
     let btns = [];
     posts.forEach(p => {
+        const idDisplay = p.confessionId ? `#${p.confessionId}` : 'Confession'; 
         const preview = p.text.substring(0, 30) + '...';
-        btns.push([Markup.button.callback(`#${p.confessionId}: ${preview}`, `view_conf_${p._id}`)]);
+        btns.push([Markup.button.callback(`${idDisplay}: ${preview}`, `view_conf_${p._id}`)]);
     });
+
+    let navRow = [];
+    if (page > 0) navRow.push(Markup.button.callback('⬅️ Prev', `browse_confessions_${page - 1}`));
+    if (skip + limit < totalPosts) navRow.push(Markup.button.callback('Next ➡️', `browse_confessions_${page + 1}`));
+    if (navRow.length > 0) btns.push(navRow);
     
-    await ctx.reply('👇 Select a Confession:', Markup.inlineKeyboard(btns));
+    const title = page === 0 ? '👇 Select a Confession:' : `👇 Page ${page + 1}:`;
+    try { await ctx.editMessageText(title, Markup.inlineKeyboard(btns)); } catch (e) { await ctx.reply(title, Markup.inlineKeyboard(btns)); }
     await ctx.answerCbQuery();
 });
 
-// View Single Confession
+// FIXED VIEW_CONF HANDLER
 bot.action(/^view_conf_(.+)$/, async ctx => {
     try {
         const post = await Post.findById(ctx.match[1]);
         if (!post) return ctx.answerCbQuery('Deleted');
 
-        // Count comments
         const commentCount = await Comment.countDocuments({ postId: post._id });
         const upCount = post.upvotes ? post.upvotes.length : 0;
         const downCount = post.downvotes ? post.downvotes.length : 0;
-
-        let msg = `**Confession #${post.confessionId}**\n`;
+        
+        // Handle undefined ID and Escape #
+        let header = 'Confession';
+        if (post.confessionId) header = `#${post.confessionId}`;
+        
+        let msg = `*${escapeMarkdown(header)}*\n`;
         msg += `────────────────\n`;
         msg += `${escapeMarkdown(post.text)}\n`;
         msg += `────────────────\n`;
-        msg += `👤 ${escapeMarkdown(post.authorName)}`;
+        msg += `👤 *${escapeMarkdown(post.authorName)}*`;
 
         await ctx.reply(msg, {
             parse_mode: 'MarkdownV2',
@@ -451,94 +373,66 @@ bot.action(/^view_conf_(.+)$/, async ctx => {
             ])
         });
         await ctx.answerCbQuery();
-    } catch(e) { console.error(e); }
+    } catch(e) { console.error(e); ctx.answerCbQuery("Error"); }
 });
 
-// Voting Logic
 bot.action(/^vote_(up|down)_(.+)$/, async ctx => {
     const type = ctx.match[1];
     const postId = ctx.match[2];
     const userId = String(ctx.from.id);
-
     const post = await Post.findById(postId);
-    if (!post) return ctx.answerCbQuery('Post not found');
+    if (!post) return ctx.answerCbQuery('Not found');
 
     let up = post.upvotes || [];
     let down = post.downvotes || [];
-
-    // Remove existing vote
     if (up.includes(userId)) up = up.filter(id => id !== userId);
     if (down.includes(userId)) down = down.filter(id => id !== userId);
-
-    // Add new vote
-    if (type === 'up') up.push(userId);
-    else down.push(userId);
+    if (type === 'up') up.push(userId); else down.push(userId);
 
     await Post.findByIdAndUpdate(postId, { upvotes: up, downvotes: down });
-    
-    // Refresh buttons
     const commentCount = await Comment.countDocuments({ postId: post._id });
-    await ctx.editMessageReplyMarkup({
-        inline_keyboard: [
-            [
-                Markup.button.callback(`👍 ${up.length}`, `vote_up_${postId}`),
-                Markup.button.callback(`👎 ${down.length}`, `vote_down_${postId}`),
-                Markup.button.callback(`💬 Reply`, `add_comment_${postId}`)
-            ],
-            [Markup.button.callback(`📂 Browse Comments (${commentCount})`, `view_comments_${postId}`)]
-        ]
-    });
+    
+    try {
+        await ctx.editMessageReplyMarkup({
+            inline_keyboard: [
+                [
+                    Markup.button.callback(`👍 ${up.length}`, `vote_up_${postId}`),
+                    Markup.button.callback(`👎 ${down.length}`, `vote_down_${postId}`),
+                    Markup.button.callback(`💬 Reply`, `add_comment_${postId}`)
+                ],
+                [Markup.button.callback(`📂 Browse Comments (${commentCount})`, `view_comments_${postId}`)]
+            ]
+        });
+    } catch(e) {}
     ctx.answerCbQuery(type === 'up' ? 'Liked!' : 'Disliked');
 });
 
-// Add Comment
 bot.action(/^add_comment_(.+)$/, async ctx => {
     await setAdminStep(String(ctx.from.id), 'awaiting_comment', { postId: ctx.match[1] });
-    await ctx.reply('✍️ Write your comment:', { reply_markup: { force_reply: true } });
+    await ctx.reply('✍️ Write your comment (Text only):', { reply_markup: { force_reply: true } });
     await ctx.answerCbQuery();
 });
 
-// View Comments
 bot.action(/^view_comments_(.+)$/, async ctx => {
-    const comments = await Comment.find({ postId: ctx.match[1] }).sort({ createdAt: 1 }).limit(10); // First 10
-    if (comments.length === 0) {
-        await ctx.reply('No comments yet. Be the first!');
-        return ctx.answerCbQuery();
-    }
-
-    let msg = `💬 **Comments**\n\n`;
-    comments.forEach(c => {
-        msg += `🔸 *${escapeMarkdown(c.authorName)}*: ${escapeMarkdown(c.text)}\n\n`;
-    });
-
+    const comments = await Comment.find({ postId: ctx.match[1] }).sort({ createdAt: 1 }).limit(10);
+    if (comments.length === 0) { await ctx.reply('No comments yet.'); return ctx.answerCbQuery(); }
+    let msg = `💬 *Comments*\n\n`;
+    comments.forEach(c => { msg += `🔸 *${escapeMarkdown(c.authorName)}*: ${escapeMarkdown(c.text)}\n\n`; });
     await ctx.reply(msg, { parse_mode: 'MarkdownV2' });
     await ctx.answerCbQuery();
 });
 
-
-// --- STREAK ---
 async function handleStreak(ctx) {
     try {
         const userId = String(ctx.from.id);
         let user = await User.findOne({ userId });
         if (!user) user = await User.create({ userId, firstName: ctx.from.first_name });
-        
         const diff = Math.floor(Math.abs(new Date() - user.streakStart) / 86400000);
         const stage = getGrowthStage(diff); 
-        
         const name = escapeMarkdown(user.nickname === "Anonymous" ? user.firstName : user.nickname);
         const escapedStage = escapeMarkdown(stage);
-        
         const msg = `🔥 *${name}*\n\n📆 Streak: *${diff} Days*\n🌱 Level: *${escapedStage}*\n🏆 Best: ${user.bestStreak}`;
-        
-        await ctx.reply(msg, {
-            parse_mode: 'MarkdownV2',
-            ...Markup.inlineKeyboard([
-                [Markup.button.callback('💔 Relapse', `rel_${userId}`)],
-                [Markup.button.callback('🏆 Leaderboard', `led_${userId}`)],
-                [Markup.button.callback('🔄 Refresh', `ref_${userId}`)]
-            ])
-        });
+        await ctx.reply(msg, { parse_mode: 'MarkdownV2', ...Markup.inlineKeyboard([[Markup.button.callback('💔 Relapse', `rel_${userId}`)], [Markup.button.callback('🏆 Leaderboard', `led_${userId}`)], [Markup.button.callback('🔄 Refresh', `ref_${userId}`)]]) });
     } catch(e) { console.error("Streak Error:", e); }
 }
 
@@ -548,7 +442,6 @@ bot.action(/^led_(.+)$/, async ctx => {
         const topUsers = await User.find({ lastActive: { $gte: sevenDaysAgo } }).sort({ streakStart: 1 }).limit(10);
         let msg = '🏆 *Top 10 Active Warriors* 🏆\n_\\(Last 7 Days\\)_\n\n';
         if (topUsers.length === 0) msg += "No active users\\.";
-
         topUsers.forEach((u, i) => {
             const d = Math.floor(Math.abs(new Date() - u.streakStart) / 86400000);
             const rawName = u.nickname === "Anonymous" ? (u.firstName || 'User') : u.nickname;
@@ -565,7 +458,6 @@ bot.action(/^rsn_(.+)_(.+)$/, async ctx => { if(!verify(ctx, ctx.match[2])) retu
 bot.action(/^ref_(.+)$/, async ctx => { if(!verify(ctx, ctx.match[1])) return ctx.answerCbQuery('Not allowed'); try{await ctx.deleteMessage();}catch(e){} await handleStreak(ctx); ctx.answerCbQuery(); });
 bot.action(/^can_(.+)$/, async ctx => { if(!verify(ctx, ctx.match[1])) return ctx.answerCbQuery('Not allowed'); try{await ctx.deleteMessage();}catch(e){} ctx.answerCbQuery(); });
 
-// --- ADMIN PANEL ---
 async function showAdminMenu(ctx) {
     const c = await User.countDocuments();
     const p = await Post.countDocuments({ status: 'pending' });
@@ -586,19 +478,14 @@ bot.action('adm_approve', async ctx => {
     await ctx.answerCbQuery();
 });
 bot.action(/^app_yes_(.+)$/, async ctx => { 
-    // Assign Confession ID
     const nextId = await getNextConfessionId();
     await Post.findByIdAndUpdate(ctx.match[1], { status: 'approved', confessionId: nextId });
-    // Add Aura to user
     const p = await Post.findById(ctx.match[1]);
-    await User.findOneAndUpdate({ userId: p.userId }, { $inc: { aura: 10 } }); // 10 Aura for approved post
-    
-    await ctx.deleteMessage(); 
-    await ctx.reply(`Approved as #${nextId}!`); 
+    await User.findOneAndUpdate({ userId: p.userId }, { $inc: { aura: 10 } });
+    await ctx.deleteMessage(); await ctx.reply(`Approved as #${nextId}!`); 
 });
 bot.action(/^app_no_(.+)$/, async ctx => { await Post.findByIdAndDelete(ctx.match[1]); await ctx.deleteMessage(); await ctx.reply('Deleted.'); });
 
-// Standard Admin
 const ask = (ctx, s, t) => { setAdminStep(String(ctx.from.id), s); ctx.reply(t); ctx.answerCbQuery(); };
 bot.action('adm_chan', async c => { const ch = await Channel.find({}); c.editMessageText('Channels:', Markup.inlineKeyboard([[Markup.button.callback('➕ Add', 'add_ch')], ...ch.map(x=>[Markup.button.callback(`🗑️ ${x.name}`, `del_ch_${x._id}`)])])); });
 bot.action('add_ch', c => ask(c, 'awaiting_channel_name', 'Name:'));
@@ -607,9 +494,6 @@ bot.action('adm_cus', async c => { const b = await CustomButton.find({}); c.edit
 bot.action('add_cus', c => ask(c, 'awaiting_btn_name', 'Name:'));
 bot.action(/^del_cus_(.+)$/, async c => { await CustomButton.findByIdAndDelete(c.match[1]); c.reply('Deleted'); c.answerCbQuery(); });
 
-// ============================================================
-// 7. SERVERLESS EXPORT
-// ============================================================
 module.exports = async (req, res) => {
     if (req.method === 'GET') return res.status(200).send('Active');
     if (req.method === 'POST') {
