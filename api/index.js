@@ -140,11 +140,24 @@ bot.start(async (ctx) => {
     let layoutRaw = await getConfig('keyboard_layout', defaultLayout);
     let layout = (typeof layoutRaw === 'string') ? JSON.parse(layoutRaw) : layoutRaw;
 
+    // *** FIX: Force Community Button if missing ***
+    // (This fixes the issue where old saved layouts don't have the new button)
+    const currentLabels = new Set(layout.flat().map(l => l.trim()));
+    if (!currentLabels.has(communityLabel)) {
+        // If layout has at least 2 rows, add to 2nd row, else add new row
+        if (layout.length >= 2) {
+            layout[1].unshift(communityLabel);
+        } else {
+            layout.push([communityLabel]);
+        }
+    }
+
     const customBtns = await CustomButton.find({});
-    const existingLabels = new Set(layout.flat().map(l => l.trim())); 
+    // Re-check existing labels including the newly added community label
+    const updatedLabels = new Set(layout.flat().map(l => l.trim())); 
     let tempRow = [];
     customBtns.forEach(btn => {
-        if (!existingLabels.has(btn.label.trim())) {
+        if (!updatedLabels.has(btn.label.trim())) {
             tempRow.push(btn.label);
             if (tempRow.length === 2) { layout.push(tempRow); tempRow = []; }
         }
@@ -260,6 +273,7 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
         const streakLabel = await getConfig('streak_btn_label', '📅 ቀኔን ቁጠር');
         if (text === streakLabel) return handleStreak(ctx);
 
+        // Community Wall Handler
         const communityLabel = await getConfig('comm_btn_label', '💬 የጥንካሬ መድረክ');
         if (text === communityLabel) return handleCommunity(ctx);
 
@@ -293,11 +307,14 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
 // --- COMMUNITY ---
 async function handleCommunity(ctx) {
     await ctx.reply(
-        '💬 **የጥንካሬ መድረክ**\n\nሀሳብ ያጋሩ፣ ለሌሎች መልስ ይስጡ።\n(ሁሉም ፅሁፍ በአድሚን ከፀደቀ በኋላ ይለቀቃል)',
-        Markup.inlineKeyboard([
-            [Markup.button.callback('📖 አንብብ', 'read_posts')],
-            [Markup.button.callback('✍️ ፃፍ', 'write_post')]
-        ])
+        '💬 *የጥንካሬ መድረክ*\n\nሀሳብ ያጋሩ፣ ለሌሎች መልስ ይስጡ።\n\\(ሁሉም ፅሁፍ በአድሚን ከፀደቀ በኋላ ይለቀቃል\\)',
+        {
+            parse_mode: 'MarkdownV2',
+            ...Markup.inlineKeyboard([
+                [Markup.button.callback('📖 አንብብ', 'read_posts')],
+                [Markup.button.callback('✍️ ፃፍ', 'write_post')]
+            ])
+        }
     );
 }
 bot.action('write_post', async ctx => {
@@ -334,7 +351,7 @@ bot.action(/^view_post_(.+)$/, async ctx => {
     try {
         const post = await Post.findById(ctx.match[1]);
         if (!post) return ctx.answerCbQuery('Deleted.');
-        let msg = `👤 **${escapeMarkdown(post.userName)}**\n\n${escapeMarkdown(post.text)}\n\n`;
+        let msg = `👤 *${escapeMarkdown(post.userName)}*\n\n${escapeMarkdown(post.text)}\n\n`;
         if (post.replies && post.replies.length > 0) {
             msg += `--- 🗣 Replies ---\n`;
             post.replies.forEach(r => msg += `🔸 *${escapeMarkdown(r.userName)}*: ${escapeMarkdown(r.text)}\n`);
