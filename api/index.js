@@ -15,21 +15,18 @@ if (!MONGODB_URI) throw new Error('MONGODB_URI is missing!');
 // 2. DATABASE SCHEMAS
 // ============================================================
 
-// A. Anti-Duplicate
 const processedUpdateSchema = new mongoose.Schema({
   update_id: { type: Number, required: true, unique: true },
   createdAt: { type: Date, default: Date.now, expires: 3600 }
 });
 const ProcessedUpdate = mongoose.models.ProcessedUpdate || mongoose.model('ProcessedUpdate', processedUpdateSchema);
 
-// B. Configs
 const configSchema = new mongoose.Schema({
   key: { type: String, required: true, unique: true },
   value: { type: mongoose.Schema.Types.Mixed, required: true }
 });
 const Config = mongoose.models.Config || mongoose.model('Config', configSchema);
 
-// C. User Data
 const userSchema = new mongoose.Schema({
   userId: { type: String, required: true, unique: true },
   firstName: String,
@@ -47,14 +44,12 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.models.User || mongoose.model('User', userSchema);
 
-// D. Channels
 const channelSchema = new mongoose.Schema({
   name: { type: String, required: true },
   link: { type: String, required: true }
 });
 const Channel = mongoose.models.Channel || mongoose.model('Channel', channelSchema);
 
-// E. Custom Buttons
 const customButtonSchema = new mongoose.Schema({
   label: { type: String, required: true, unique: true },
   type: { type: String, enum: ['text', 'photo', 'video', 'voice'], default: 'text' },
@@ -64,14 +59,12 @@ const customButtonSchema = new mongoose.Schema({
 });
 const CustomButton = mongoose.models.CustomButton || mongoose.model('CustomButton', customButtonSchema);
 
-// F. Motivation
 const motivationSchema = new mongoose.Schema({
   text: { type: String, required: true },
   addedAt: { type: Date, default: Date.now }
 });
 const Motivation = mongoose.models.Motivation || mongoose.model('Motivation', motivationSchema);
 
-// G. Confessions
 const postSchema = new mongoose.Schema({
     confessionId: Number,
     userId: String,
@@ -85,7 +78,6 @@ const postSchema = new mongoose.Schema({
 postSchema.index({ createdAt: 1 }, { expireAfterSeconds: 604800 }); 
 const Post = mongoose.models.Post || mongoose.model('Post', postSchema);
 
-// H. Comments
 const commentSchema = new mongoose.Schema({
     postId: mongoose.Schema.Types.ObjectId,
     userId: String,
@@ -139,12 +131,17 @@ function getGrowthStage(days) {
     return '👑 ንጉስ (Legend)';
 }
 
+// --- CLEAN UI HELPER ---
 async function sendCleanMessage(ctx, text, extra, userId) {
     const user = await User.findOne({ userId });
+    // Try delete old message
     if (user && user.lastMenuId) {
-        try { await ctx.deleteMessage(user.lastMenuId); } catch (e) {}
+        try { await ctx.deleteMessage(user.lastMenuId); } 
+        catch (e) { /* Ignore if old */ }
     }
+    // Send new
     const sent = await ctx.reply(text, extra);
+    // Save new ID
     await User.findOneAndUpdate({ userId }, { lastMenuId: sent.message_id });
     return sent;
 }
@@ -156,7 +153,7 @@ const bot = new Telegraf(BOT_TOKEN);
 
 bot.start(async (ctx) => {
   try {
-    if (ctx.chat.type !== 'private') return; // Silent in groups
+    if (ctx.chat.type !== 'private') return; 
 
     const userId = String(ctx.from.id);
     const firstName = ctx.from.first_name || 'Friend';
@@ -196,6 +193,8 @@ bot.start(async (ctx) => {
     }
 
     const welcomeMsg = await getConfig('welcome_msg', `ሰላም ${firstName}! እንኳን በሰላም መጣህ።`);
+    
+    // Use Clean Message Logic
     await sendCleanMessage(ctx, welcomeMsg, Markup.keyboard(layout).resize(), userId);
 
   } catch (e) { console.error(e); }
@@ -212,7 +211,7 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
         const userId = String(ctx.from.id);
         const text = ctx.message.text; 
         
-        if (ctx.chat.type !== 'private') return;
+        if (ctx.chat.type !== 'private') return; 
 
         const currentUser = await User.findOne({ userId });
         if (currentUser && currentUser.isBanned) return;
@@ -224,74 +223,23 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
             if (state && state.step) {
                 if (text === '/cancel') { await clearAdminStep(userId); return ctx.reply('❌ Canceled.'); }
                 
-                // --- NEW: BROADCAST WIZARD ---
+                // --- SIMPLIFIED BROADCAST WIZARD (As Requested) ---
                 if (state.step === 'awaiting_broadcast_content') {
-                    // 1. Capture Content
-                    let msgType = 'text';
-                    let content = text;
-                    let caption = ctx.message.caption || '';
+                    // Directly save the message content to broadcast "As Is"
+                    // We save the necessary IDs to use copyMessage later
+                    const broadcastData = {
+                        fromChatId: ctx.chat.id,
+                        messageId: ctx.message.message_id
+                    };
                     
-                    // Handle media
-                    if (ctx.message.photo) { msgType = 'photo'; content = ctx.message.photo[ctx.message.photo.length-1].file_id; }
-                    else if (ctx.message.video) { msgType = 'video'; content = ctx.message.video.file_id; }
-                    else if (ctx.message.voice) { msgType = 'voice'; content = ctx.message.voice.file_id; }
-                    else if (!text) return ctx.reply('Unsupported format.');
+                    await setAdminStep(userId, 'awaiting_broadcast_confirm', broadcastData);
 
-                    // Save to temp
-                    await setAdminStep(userId, 'awaiting_broadcast_links', { 
-                        msgType, content, caption,
-                        sourceMsgId: ctx.message.message_id // Keep original for copy if needed
-                    });
-                    
-                    return ctx.reply(
-                        '🔗 **Link (Buttons) መጨመር ይፈልጋሉ?**\n\n' +
-                        'ካልፈለጉ "No" ይበሉ።\n\n' +
-                        'Format:\nName - Link\nName 2 - Link 2'
-                    );
-                }
-
-                if (state.step === 'awaiting_broadcast_links') {
-                    let markup = null;
-                    
-                    // 2. Parse Links
-                    if (text && text.toLowerCase() !== 'no') {
-                        let rows = [];
-                        const lines = text.split('\n');
-                        for (let line of lines) {
-                            const parts = line.split('-');
-                            if (parts.length >= 2) {
-                                const label = parts[0].trim();
-                                const url = parts.slice(1).join('-').trim();
-                                if (url.startsWith('http')) rows.push([Markup.button.url(label, url)]);
-                            }
-                        }
-                        if (rows.length > 0) markup = { inline_keyboard: rows };
-                    }
-
-                    // Save Markup to temp
-                    const currentData = state.tempData;
-                    currentData.markup = markup;
-                    await setAdminStep(userId, 'awaiting_broadcast_confirm', currentData);
-
-                    // 3. Send Preview
-                    await ctx.reply('👁 **Preview (እንዲህ ሆኖ ይላካል):**');
-                    
-                    // Use copyMessage to simulate exactly how users will see it
-                    // We send it back to admin
+                    // Show Preview
+                    await ctx.reply('👁 **Preview (ልክ እንደዚህ ይላካል):**');
                     try {
-                        if (currentData.msgType === 'text') {
-                            await ctx.reply(currentData.content, markup ? { reply_markup: markup } : {});
-                        } else {
-                            // Using specific methods for media to ensure caption/markup work
-                            let extra = markup ? { reply_markup: markup } : {};
-                            if (currentData.caption) extra.caption = currentData.caption;
-                            
-                            if (currentData.msgType === 'photo') await ctx.replyWithPhoto(currentData.content, extra);
-                            else if (currentData.msgType === 'video') await ctx.replyWithVideo(currentData.content, extra);
-                            else if (currentData.msgType === 'voice') await ctx.replyWithVoice(currentData.content, extra);
-                        }
+                        await ctx.telegram.copyMessage(ctx.chat.id, broadcastData.fromChatId, broadcastData.messageId);
                     } catch (e) {
-                        return ctx.reply('❌ Preview Error. Invalid format? /cancel to stop.');
+                        return ctx.reply('❌ Preview Error.');
                     }
 
                     return ctx.reply('✅ ይላክ? /confirm ብለው ያረጋግጡ።');
@@ -299,31 +247,23 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
 
                 if (state.step === 'awaiting_broadcast_confirm') {
                     if (text === '/confirm') {
-                        // 4. EXECUTE BROADCAST
                         const data = state.tempData;
                         const users = await User.find({});
                         let success = 0, fail = 0;
                         
                         await ctx.reply(`🚀 Broadcasting to ${users.length} users...`);
                         
-                        // Background process (don't await loop to prevent timeout)
                         (async () => {
                             for (const u of users) {
                                 try {
-                                    let extra = data.markup ? { reply_markup: data.markup } : {};
-                                    if (data.caption) extra.caption = data.caption;
-
-                                    if (data.msgType === 'text') await bot.telegram.sendMessage(u.userId, data.content, extra);
-                                    else if (data.msgType === 'photo') await bot.telegram.sendPhoto(u.userId, data.content, extra);
-                                    else if (data.msgType === 'video') await bot.telegram.sendVideo(u.userId, data.content, extra);
-                                    else if (data.msgType === 'voice') await bot.telegram.sendVoice(u.userId, data.content, extra);
-                                    
+                                    // Using copyMessage preserves everything (Text, Media, Captions, Entities)
+                                    // NOTE: Telegram removes Inline Buttons on Forward/Copy from user. 
+                                    // This is an API limitation, not a code bug.
+                                    await bot.telegram.copyMessage(u.userId, data.fromChatId, data.messageId);
                                     success++;
                                 } catch (e) { fail++; }
-                                // Small delay to respect rate limits
                                 await new Promise(r => setTimeout(r, 30)); 
                             }
-                            // Notify Admin when done
                             try { await bot.telegram.sendMessage(userId, `📢 **Broadcast Report**\n\n✅ Sent: ${success}\n❌ Failed: ${fail}`); } catch(e){}
                         })();
 
@@ -456,13 +396,15 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
     } catch (e) { console.error(e); }
 });
 
-// ... (Other functions: showProfile, handleConfessions, etc. remain the same) ...
-// Included here for completeness so you can copy-paste fully
+// ============================================================
+// 6. LOGIC FUNCTIONS
+// ============================================================
 
 async function showProfile(ctx, userId) {
     const user = await User.findOne({ userId });
     if (!user) return ctx.reply("User not found.");
     const msg = `👤 *Profile*\n\n🏷️ *Name:* ${escapeMarkdown(user.nickname)}\n🎭 *Emoji:* ${user.emoji}\n⚡️ *Aura:* ${user.aura}\n📝 *Bio:* ${escapeMarkdown(user.bio)}`;
+    
     await sendCleanMessage(ctx, msg, { parse_mode: 'MarkdownV2', ...Markup.inlineKeyboard([[Markup.button.callback('✏️ Edit Name', 'prof_name'), Markup.button.callback('✏️ Edit Bio', 'prof_bio')], [Markup.button.callback('😊 Edit Emoji', 'prof_emoji')], [Markup.button.callback('🔙 Back', 'back_to_menu')]]) }, userId);
 }
 bot.action('prof_name', async ctx => { await setAdminStep(String(ctx.from.id), 'edit_nickname'); ctx.reply('Enter nickname:'); ctx.answerCbQuery(); });
@@ -742,7 +684,6 @@ bot.action(/^rsn_(.+)_(.+)$/, async ctx => { if(!verify(ctx, ctx.match[2])) retu
 bot.action(/^ref_(.+)$/, async ctx => { if(!verify(ctx, ctx.match[1])) return ctx.answerCbQuery('Not allowed'); try{await ctx.deleteMessage();}catch(e){} await handleStreak(ctx); ctx.answerCbQuery(); });
 bot.action(/^can_(.+)$/, async ctx => { if(!verify(ctx, ctx.match[1])) return ctx.answerCbQuery('Not allowed'); try{await ctx.deleteMessage();}catch(e){} ctx.answerCbQuery(); });
 
-// --- ADMIN PANEL ---
 async function showAdminMenu(ctx) {
     const c = await User.countDocuments();
     const p = await Post.countDocuments({ status: 'pending' });
