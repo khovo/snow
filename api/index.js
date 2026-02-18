@@ -27,7 +27,6 @@ const configSchema = new mongoose.Schema({
 });
 const Config = mongoose.models.Config || mongoose.model('Config', configSchema);
 
-// Updated User Schema with lastMenuId for cleaning
 const userSchema = new mongoose.Schema({
   userId: { type: String, required: true, unique: true },
   firstName: String,
@@ -35,7 +34,7 @@ const userSchema = new mongoose.Schema({
   bestStreak: { type: Number, default: 0 },
   relapseHistory: [{ date: { type: Date, default: Date.now }, reason: String }],
   lastActive: { type: Date, default: Date.now },
-  lastMenuId: { type: Number }, // To delete old menu on /start
+  lastMenuId: { type: Number },
   nickname: { type: String, default: "Anonymous" },
   bio: { type: String, default: "" },
   emoji: { type: String, default: "👤" },
@@ -66,7 +65,6 @@ const motivationSchema = new mongoose.Schema({
 });
 const Motivation = mongoose.models.Motivation || mongoose.model('Motivation', motivationSchema);
 
-// Auto-Delete Confessions after 7 Days
 const postSchema = new mongoose.Schema({
     confessionId: Number,
     userId: String,
@@ -80,7 +78,6 @@ const postSchema = new mongoose.Schema({
 postSchema.index({ createdAt: 1 }, { expireAfterSeconds: 604800 }); 
 const Post = mongoose.models.Post || mongoose.model('Post', postSchema);
 
-// Auto-Delete Comments after 7 Days
 const commentSchema = new mongoose.Schema({
     postId: mongoose.Schema.Types.ObjectId,
     userId: String,
@@ -114,8 +111,10 @@ async function getAdminState(userId) { const user = await User.findOne({ userId 
 async function clearAdminStep(userId) { await User.findOneAndUpdate({ userId }, { adminState: { step: null, tempData: {} } }); }
 async function getConfig(key, def) { const doc = await Config.findOne({ key }); return doc ? doc.value : def; }
 
+// --- FIXED MARKDOWN ESCAPE FUNCTION ---
 function escapeMarkdown(text) {
     if (!text) return '';
+    // Escapes all special characters for MarkdownV2
     return String(text).replace(/[_*[\]()~`>#+\-=|{}.!]/g, '\\$&');
 }
 
@@ -185,7 +184,6 @@ bot.start(async (ctx) => {
 
     const welcomeMsg = await getConfig('welcome_msg', `ሰላም ${firstName}! እንኳን በሰላም መጣህ።`);
     
-    // Send and Save Message ID for future cleanup
     const sentMsg = await ctx.reply(welcomeMsg, Markup.keyboard(layout).resize());
     await User.findOneAndUpdate({ userId }, { firstName, lastActive: new Date(), lastMenuId: sentMsg.message_id }, { upsert: true });
     
@@ -347,19 +345,14 @@ async function handleConfessions(ctx) {
             [Markup.button.callback('📜 Browse Confessions', 'browse_confessions_0')],
             [Markup.button.callback('➕ Post Confession', 'write_confession')],
             [Markup.button.callback('👤 My Profile', 'my_profile')],
-            [Markup.button.callback('🔙 Back to Menu', 'back_to_menu')] // Added Back
+            [Markup.button.callback('🔙 Back to Menu', 'back_to_menu')] 
         ])
     );
 }
 bot.action('back_to_menu', async ctx => {
-    // Delete current message and simulate /start
-    await ctx.deleteMessage();
-    // Re-trigger start logic (simplified: just send welcome)
-    // NOTE: Cannot re-trigger actual /start event easily, but we can send the menu.
+    try { await ctx.deleteMessage(); } catch (e) {}
     const userId = String(ctx.from.id);
     const welcomeMsg = await getConfig('welcome_msg', `Welcome back!`);
-    
-    // We need the layout again
     const urgeLabel = await getConfig('urge_btn_label', '🆘 እርዳኝ');
     const communityLabel = await getConfig('comm_btn_label', '🗣 Confessions');
     const streakLabel = await getConfig('streak_btn_label', '📅 ቀኔን ቁጠር');
@@ -367,7 +360,6 @@ bot.action('back_to_menu', async ctx => {
     const defaultLayout = [[urgeLabel, streakLabel], [communityLabel, channelLabel]];
     let layoutRaw = await getConfig('keyboard_layout', defaultLayout);
     let layout = (typeof layoutRaw === 'string') ? JSON.parse(layoutRaw) : layoutRaw;
-    // Fix missing button
     const currentLabels = new Set(layout.flat().map(l => l.trim()));
     if (!currentLabels.has(communityLabel)) {
         if (layout.length >= 2) layout[1].unshift(communityLabel); else layout.push([communityLabel]);
@@ -392,7 +384,6 @@ bot.action('write_confession', async ctx => {
     await ctx.answerCbQuery();
 });
 
-// Fixed Browse Regex and Logic
 bot.action(/^browse_confessions_(\d+)$/, async ctx => {
     const page = parseInt(ctx.match[1]);
     const limit = 10;
@@ -414,7 +405,6 @@ bot.action(/^browse_confessions_(\d+)$/, async ctx => {
     if (skip + limit < totalPosts) navRow.push(Markup.button.callback('Next ➡️', `browse_confessions_${page + 1}`));
     if (navRow.length > 0) btns.push(navRow);
     
-    // Back Button
     btns.push([Markup.button.callback('🔙 Back', 'back_to_menu')]);
     
     const title = page === 0 ? '👇 Select a Confession:' : `👇 Page ${page + 1}:`;
@@ -422,6 +412,7 @@ bot.action(/^browse_confessions_(\d+)$/, async ctx => {
     await ctx.answerCbQuery();
 });
 
+// Fixed view_conf
 bot.action(/^view_conf_(.+)$/, async ctx => {
     try {
         const post = await Post.findById(ctx.match[1]);
@@ -492,11 +483,11 @@ bot.action(/^add_comment_(.+)$/, async ctx => {
     await ctx.answerCbQuery();
 });
 
-// --- UPDATED COMMENT SYSTEM WITH REGEX FIX ---
+// --- UPDATED VIEW COMMENTS WITH FIXES ---
 bot.action(/^view_comments_([a-f\d]+)_(\d+)$/, async ctx => {
     const postId = ctx.match[1];
     const page = parseInt(ctx.match[2]);
-    const limit = 1; // 1 comment per page
+    const limit = 1; 
     const skip = page * limit;
 
     const comments = await Comment.find({ postId: postId }).sort({ createdAt: 1 }).skip(skip).limit(limit);
@@ -511,7 +502,8 @@ bot.action(/^view_comments_([a-f\d]+)_(\d+)$/, async ctx => {
     const upCount = c.upvotes ? c.upvotes.length : 0;
     const downCount = c.downvotes ? c.downvotes.length : 0;
 
-    let msg = `💬 *Comment (${page + 1}/${totalComments})*\n\n`;
+    // FIX: Escaping parenthesis for (x/y)
+    let msg = `💬 *Comment \\(${page + 1}/${totalComments}\\)*\n\n`;
     msg += `👤 *${escapeMarkdown(c.authorName)}*:\n${escapeMarkdown(c.text)}\n`;
     
     if (c.replies && c.replies.length > 0) {
@@ -543,8 +535,8 @@ bot.action(/^view_comments_([a-f\d]+)_(\d+)$/, async ctx => {
 bot.action(/^cvote_(up|down)_([a-f\d]+)_([a-f\d]+)_(\d+)$/, async ctx => {
     const type = ctx.match[1];
     const commentId = ctx.match[2];
-    const postId = ctx.match[3]; // Not used here but kept for routing
-    const page = ctx.match[4]; // Not used here but kept for routing
+    const postId = ctx.match[3];
+    const page = ctx.match[4]; // kept for potential reload
     const userId = String(ctx.from.id);
 
     const comment = await Comment.findById(commentId);
