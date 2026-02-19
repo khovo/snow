@@ -92,13 +92,12 @@ commentSchema.index({ createdAt: 1 }, { expireAfterSeconds: 604800 });
 const Comment = mongoose.models.Comment || mongoose.model('Comment', commentSchema);
 
 // ============================================================
-// 3. DB CONNECTION (OPTIMIZED)
+// 3. DB CONNECTION
 // ============================================================
 let cachedDb = null;
 async function connectToDatabase() {
   if (cachedDb) return cachedDb;
   try {
-    // bufferCommands: false helps fail fast if connection is lost
     cachedDb = await mongoose.connect(MONGODB_URI, { 
         serverSelectionTimeoutMS: 5000, 
         socketTimeoutMS: 45000,
@@ -121,6 +120,16 @@ function escapeMarkdown(text) {
     return String(text).replace(/[_*[\]()~`>#+\-=|{}.!]/g, '\\$&');
 }
 
+// New Helper for HTML escaping (More robust for names)
+function escapeHtml(text) {
+    if (!text) return '';
+    return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
+
 async function getNextConfessionId() {
     const last = await Post.findOne().sort({ confessionId: -1 });
     return (last && last.confessionId) ? last.confessionId + 1 : 1000;
@@ -136,20 +145,16 @@ function getGrowthStage(days) {
     return '👑 ንጉስ (Legend)';
 }
 
-// --- CLEAN UI HELPER ---
 async function sendCleanMessage(ctx, text, extra, userId) {
     const user = await User.findOne({ userId });
     
-    // In Groups, we might not have permission to delete messages or track the last ID correctly per user context
     if (ctx.chat.type === 'private' && user && user.lastMenuId) {
         try { await ctx.deleteMessage(user.lastMenuId); } 
-        catch (e) { /* Ignore if old or fail */ }
+        catch (e) { }
     }
     
-    // Send new
     const sent = await ctx.reply(text, extra);
     
-    // Only save lastMenuId if private
     if (ctx.chat.type === 'private') {
         await User.findOneAndUpdate({ userId }, { lastMenuId: sent.message_id });
     }
@@ -170,7 +175,6 @@ bot.start(async (ctx) => {
 
     await User.findOneAndUpdate({ userId }, { firstName, lastActive: new Date() }, { upsert: true });
     
-    // Only clear admin step if in private
     if (ctx.chat.type === 'private' && ADMIN_IDS.includes(userId)) await clearAdminStep(userId);
 
     const urgeLabel = await getConfig('urge_btn_label', '🆘 እርዳኝ');
@@ -198,7 +202,6 @@ bot.start(async (ctx) => {
     });
     if (tempRow.length > 0) layout.push(tempRow);
 
-    // Only show Admin Panel button in Private Chat
     if (ctx.chat.type === 'private' && ADMIN_IDS.includes(userId)) {
         if (!layout.flat().includes('🔐 Admin Panel')) layout.push(['🔐 Admin Panel']);
     }
@@ -224,13 +227,11 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
         if (currentUser && currentUser.isBanned) return;
         await User.findOneAndUpdate({ userId }, { lastActive: new Date() });
 
-        // === ADMIN WIZARD (RESTRICT TO PRIVATE CHAT) ===
         if (ctx.chat.type === 'private' && ADMIN_IDS.includes(userId)) {
             const state = await getAdminState(userId);
             if (state && state.step) {
                 if (text === '/cancel') { await clearAdminStep(userId); return ctx.reply('❌ Canceled.'); }
                 
-                // --- BROADCAST WITH BUTTONS ---
                 if (state.step === 'awaiting_broadcast_content') {
                     const replyMarkup = ctx.message.reply_markup;
                     const broadcastData = {
@@ -287,7 +288,6 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
                     }
                 }
 
-                // ... Other Admin Logic ...
                 if (state.step === 'awaiting_ban_id') { await User.findOneAndUpdate({ userId: text.trim() }, { isBanned: true }); await ctx.reply(`🚫 Banned.`); await clearAdminStep(userId); return; }
                 if (state.step === 'awaiting_welcome') { await Config.findOneAndUpdate({ key: 'welcome_msg' }, { value: text }, { upsert: true }); await ctx.reply('✅ Saved!'); await clearAdminStep(userId); return; }
                 if (state.step === 'awaiting_channel_name') { await setAdminStep(userId, 'awaiting_channel_link', { name: text }); return ctx.reply('🔗 Link:'); }
@@ -321,7 +321,6 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
             }
         }
 
-        // === USER STATE (Write confession, comment) - PRIVATE ONLY ===
         if (ctx.chat.type === 'private') {
             const userState = await getAdminState(userId);
             if (userState && userState.step === 'edit_nickname') { await User.findOneAndUpdate({ userId }, { nickname: text }); await clearAdminStep(userId); await ctx.reply('✅ Nickname updated!'); return showProfile(ctx, userId); }
@@ -358,7 +357,6 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
             }
         }
 
-        // === MENU INTERACTIONS (Allowed in Groups) ===
         if (text === '🔐 Admin Panel' && ADMIN_IDS.includes(userId) && ctx.chat.type === 'private') return showAdminMenu(ctx);
 
         const urgeLabel = await getConfig('urge_btn_label', '🆘 እርዳኝ');
@@ -396,7 +394,6 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
                 extra.reply_markup = { inline_keyboard: linkBtns };
             }
             
-            // Only try to delete menu message in private chat
             if (ctx.chat.type === 'private') {
                 const user = await User.findOne({ userId });
                 if (user && user.lastMenuId) try { await ctx.deleteMessage(user.lastMenuId); } catch(e){}
@@ -413,10 +410,6 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
         }
     } catch (e) { console.error(e); }
 });
-
-// ============================================================
-// 6. LOGIC FUNCTIONS
-// ============================================================
 
 async function showProfile(ctx, userId) {
     const user = await User.findOne({ userId });
@@ -696,16 +689,19 @@ bot.action(/^led_(.+)$/, async ctx => {
     try {
         const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
         const topUsers = await User.find({ lastActive: { $gte: sevenDaysAgo } }).sort({ streakStart: 1 }).limit(10);
-        let msg = '🏆 *Top 10 Active Warriors* 🏆\n_\\(Last 7 Days\\)_\n\n';
-        if (topUsers.length === 0) msg += "No active users\\.";
+        let msg = '🏆 <b>Top 10 Active Warriors</b> 🏆\n<i>(Last 7 Days)</i>\n\n';
+        if (topUsers.length === 0) msg += "No active users.";
         topUsers.forEach((u, i) => {
             const d = Math.floor(Math.abs(new Date() - u.streakStart) / 86400000);
             const rawName = u.nickname === "Anonymous" ? (u.firstName || 'User') : u.nickname;
-            const name = escapeMarkdown(rawName.substring(0, 15));
-            msg += `${i+1}\\. ${name} — *${d} days*\n`;
+            const name = escapeHtml(rawName.substring(0, 15));
+            msg += `${i+1}. <b>${name}</b> — ${d} days\n`;
         });
-        await ctx.editMessageText(msg, { parse_mode: 'MarkdownV2', ...Markup.inlineKeyboard([[Markup.button.callback('🔙 Back', `ref_${ctx.match[1]}`)]]) });
-    } catch (e) { ctx.answerCbQuery("Error"); }
+        await ctx.editMessageText(msg, { parse_mode: 'HTML', ...Markup.inlineKeyboard([[Markup.button.callback('🔙 Back', `ref_${ctx.match[1]}`)]]) });
+    } catch (e) { 
+        console.error(e); // See logs for error
+        ctx.answerCbQuery("Error loading leaderboard."); 
+    }
 });
 
 const verify = (ctx, id) => String(ctx.from.id) === id;
@@ -767,3 +763,5 @@ module.exports = async (req, res) => {
     }
     res.status(200).send('OK');
 };
+
+
