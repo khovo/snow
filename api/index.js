@@ -120,7 +120,7 @@ function escapeMarkdown(text) {
     return String(text).replace(/[_*[\]()~`>#+\-=|{}.!]/g, '\\$&');
 }
 
-// New Helper for HTML escaping (More robust for names)
+// Fixed: Using Array.from to handle surrogate pairs (fancy fonts) correctly
 function escapeHtml(text) {
     if (!text) return '';
     return String(text)
@@ -143,6 +143,40 @@ function getGrowthStage(days) {
     if (days < 60) return '🍃 ለምለም (Flourishing)';
     if (days < 90) return '🌳 ዋርካ (Canopy)';
     return '👑 ንጉስ (Legend)';
+}
+
+// HELPER: Generate Main Keyboard Layout
+async function getMainLayout(userId) {
+    const urgeLabel = await getConfig('urge_btn_label', '🆘 እርዳኝ');
+    const communityLabel = await getConfig('comm_btn_label', '🗣 Confessions');
+    const streakLabel = await getConfig('streak_btn_label', '📅 ቀኔን ቁጠር');
+    const channelLabel = await getConfig('channel_btn_label', '📢 ቻናሎች');
+
+    const defaultLayout = [[urgeLabel, streakLabel], [communityLabel, channelLabel]];
+    let layoutRaw = await getConfig('keyboard_layout', defaultLayout);
+    let layout = (typeof layoutRaw === 'string') ? JSON.parse(layoutRaw) : layoutRaw;
+
+    const currentLabels = new Set(layout.flat().map(l => l.trim()));
+    if (!currentLabels.has(communityLabel)) {
+        if (layout.length >= 2) layout[1].unshift(communityLabel); else layout.push([communityLabel]);
+    }
+
+    const customBtns = await CustomButton.find({});
+    const updatedLabels = new Set(layout.flat().map(l => l.trim())); 
+    let tempRow = [];
+    customBtns.forEach(btn => {
+        if (!updatedLabels.has(btn.label.trim())) {
+            tempRow.push(btn.label);
+            if (tempRow.length === 2) { layout.push(tempRow); tempRow = []; }
+        }
+    });
+    if (tempRow.length > 0) layout.push(tempRow);
+
+    if (ADMIN_IDS.includes(userId)) {
+        if (!layout.flat().includes('🔐 Admin Panel')) layout.push(['🔐 Admin Panel']);
+    }
+    
+    return layout;
 }
 
 async function sendCleanMessage(ctx, text, extra, userId) {
@@ -177,35 +211,7 @@ bot.start(async (ctx) => {
     
     if (ctx.chat.type === 'private' && ADMIN_IDS.includes(userId)) await clearAdminStep(userId);
 
-    const urgeLabel = await getConfig('urge_btn_label', '🆘 እርዳኝ');
-    const communityLabel = await getConfig('comm_btn_label', '🗣 Confessions');
-    const streakLabel = await getConfig('streak_btn_label', '📅 ቀኔን ቁጠር');
-    const channelLabel = await getConfig('channel_btn_label', '📢 ቻናሎች');
-
-    const defaultLayout = [[urgeLabel, streakLabel], [communityLabel, channelLabel]];
-    let layoutRaw = await getConfig('keyboard_layout', defaultLayout);
-    let layout = (typeof layoutRaw === 'string') ? JSON.parse(layoutRaw) : layoutRaw;
-
-    const currentLabels = new Set(layout.flat().map(l => l.trim()));
-    if (!currentLabels.has(communityLabel)) {
-        if (layout.length >= 2) layout[1].unshift(communityLabel); else layout.push([communityLabel]);
-    }
-
-    const customBtns = await CustomButton.find({});
-    const updatedLabels = new Set(layout.flat().map(l => l.trim())); 
-    let tempRow = [];
-    customBtns.forEach(btn => {
-        if (!updatedLabels.has(btn.label.trim())) {
-            tempRow.push(btn.label);
-            if (tempRow.length === 2) { layout.push(tempRow); tempRow = []; }
-        }
-    });
-    if (tempRow.length > 0) layout.push(tempRow);
-
-    if (ctx.chat.type === 'private' && ADMIN_IDS.includes(userId)) {
-        if (!layout.flat().includes('🔐 Admin Panel')) layout.push(['🔐 Admin Panel']);
-    }
-
+    const layout = await getMainLayout(userId);
     const welcomeMsg = await getConfig('welcome_msg', `ሰላም ${firstName}! እንኳን በሰላም መጣህ።`);
     
     await sendCleanMessage(ctx, welcomeMsg, Markup.keyboard(layout).resize(), userId);
@@ -364,7 +370,9 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
             const count = await Motivation.countDocuments();
             if (count === 0) return ctx.reply('Empty.');
             const m = await Motivation.findOne().skip(Math.floor(Math.random() * count));
-            return sendCleanMessage(ctx, `🛡️ **Stay Strong!**\n\n${m.text}`, { parse_mode: 'Markdown' }, userId);
+            // FIXED: Resend Keyboard with simple text responses
+            const layout = await getMainLayout(userId);
+            return sendCleanMessage(ctx, `🛡️ **Stay Strong!**\n\n${m.text}`, { parse_mode: 'Markdown', ...Markup.keyboard(layout).resize() }, userId);
         }
 
         const streakLabel = await getConfig('streak_btn_label', '📅 ቀኔን ቁጠር');
@@ -389,9 +397,16 @@ bot.on(['text', 'photo', 'video', 'voice'], async (ctx) => {
         if (customBtn) {
             let extra = { parse_mode: 'Markdown' };
             if (customBtn.caption) extra.caption = customBtn.caption;
-            if (customBtn.inlineLinks && customBtn.inlineLinks.length > 0) {
+            
+            // Check if we have inline links
+            const hasInline = customBtn.inlineLinks && customBtn.inlineLinks.length > 0;
+            if (hasInline) {
                 const linkBtns = customBtn.inlineLinks.map(l => [Markup.button.url(l.label, l.url)]);
                 extra.reply_markup = { inline_keyboard: linkBtns };
+            } else if (customBtn.type === 'text') {
+                 // FIXED: If it's just text (no inline links), RE-ATTACH the main keyboard so it doesn't disappear
+                 const layout = await getMainLayout(userId);
+                 extra.reply_markup = Markup.keyboard(layout).resize().reply_markup;
             }
             
             if (ctx.chat.type === 'private') {
@@ -450,20 +465,8 @@ bot.action('back_to_menu', async ctx => {
         const userId = String(ctx.from.id);
         const welcomeMsg = await getConfig('welcome_msg', `Welcome back!`);
         
-        const urgeLabel = await getConfig('urge_btn_label', '🆘 እርዳኝ');
-        const communityLabel = await getConfig('comm_btn_label', '🗣 Confessions');
-        const streakLabel = await getConfig('streak_btn_label', '📅 ቀኔን ቁጠር');
-        const channelLabel = await getConfig('channel_btn_label', '📢 ቻናሎች');
-        const defaultLayout = [[urgeLabel, streakLabel], [communityLabel, channelLabel]];
-        let layoutRaw = await getConfig('keyboard_layout', defaultLayout);
-        let layout = (typeof layoutRaw === 'string') ? JSON.parse(layoutRaw) : layoutRaw;
-        
-        const currentLabels = new Set(layout.flat().map(l => l.trim()));
-        if (!currentLabels.has(communityLabel)) {
-            if (layout.length >= 2) layout[1].unshift(communityLabel); else layout.push([communityLabel]);
-        }
-        
-        if (ADMIN_IDS.includes(userId) && ctx.chat.type === 'private' && !layout.flat().includes('🔐 Admin Panel')) layout.push(['🔐 Admin Panel']);
+        // FIXED: Re-use centralized layout generator
+        const layout = await getMainLayout(userId);
 
         await ctx.deleteMessage();
         const sent = await ctx.reply(welcomeMsg, Markup.keyboard(layout).resize());
@@ -694,12 +697,15 @@ bot.action(/^led_(.+)$/, async ctx => {
         topUsers.forEach((u, i) => {
             const d = Math.floor(Math.abs(new Date() - u.streakStart) / 86400000);
             const rawName = u.nickname === "Anonymous" ? (u.firstName || 'User') : u.nickname;
-            const name = escapeHtml(rawName.substring(0, 15));
+            
+            // FIXED: Safe unicode slicing for fancy fonts/emojis
+            const name = escapeHtml(Array.from(rawName).slice(0, 15).join(''));
+            
             msg += `${i+1}. <b>${name}</b> — ${d} days\n`;
         });
         await ctx.editMessageText(msg, { parse_mode: 'HTML', ...Markup.inlineKeyboard([[Markup.button.callback('🔙 Back', `ref_${ctx.match[1]}`)]]) });
     } catch (e) { 
-        console.error(e); // See logs for error
+        console.error(e); 
         ctx.answerCbQuery("Error loading leaderboard."); 
     }
 });
@@ -758,7 +764,6 @@ module.exports = async (req, res) => {
             try { await ProcessedUpdate.create({ update_id: update.update_id }); } catch(e) { if(e.code===11000) return; throw e; }
             await bot.handleUpdate(update);
         };
-        // Increased timeout from 4500 to 9000 to handle cold starts
         try { await Promise.race([logic(), new Promise((_, r) => setTimeout(() => r(new Error('Timeout')), 9000))]); } catch(e) {}
     }
     res.status(200).send('OK');
